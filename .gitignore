@@ -1,0 +1,14 @@
+
+# Global
+.DS_Store
+*.log
+*.pyc
+__pycache__/
+.env
+.venv/
+.env.*
+node_modules/
+dist/
+build/
+# VSCode
+.vscode/
