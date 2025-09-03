@@ -4,8 +4,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict
 from datetime import datetime, timezone, timedelta
+import statistics as stats
 
-app = FastAPI(title="Parking Lot Occupancy Tracker API", version="0.1.0")
+from . import db
+from .schemas import (
+    OccupancyIn, OccupancyOut, DetectionIn,
+    SnapshotOut, ForecastOut, ForecastPoint, SystemStatus
+)
+
+app = FastAPI(title="Parking Lot Occupancy Tracker API", version="0.2.0")
 
 # CORS for local dev (tighten later)
 app.add_middleware(
@@ -80,35 +87,7 @@ def delete_spot(spot_id: str):
     del _SPOTS[spot_id]
     return None
 
-# ---------- MVP Occupancy endpoints ----------
-class OccupancyIn(BaseModel):
-    lotId: str = Field(..., min_length=1)
-    spacesTotal: int = Field(..., ge=0)
-    spacesOccupied: int = Field(..., ge=0)
-    timestamp: datetime
-
-class OccupancyOut(OccupancyIn):
-    pass
-
-# In-memory time-series: { lotId: [records sorted by timestamp] }
-_OCC: Dict[str, List[dict]] = {}
-
-def _occ_add(rec: dict) -> None:
-    lot = rec["lotId"]
-    _OCC.setdefault(lot, []).append(rec)
-    _OCC[lot].sort(key=lambda r: r["timestamp"])
-
-def _occ_latest(lot_id: str):
-    arr = _OCC.get(lot_id, [])
-    return arr[-1] if arr else None
-
-def _occ_history(lot_id: str, minutes: int):
-    arr = _OCC.get(lot_id, [])
-    if not arr:
-        return []
-    cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
-    return [r for r in arr if r["timestamp"] >= cutoff]
-
+# ---------- Occupancy time-series (your existing shapes) ----------
 @app.post("/api/occupancy", response_model=OccupancyOut, status_code=status.HTTP_201_CREATED)
 def post_occupancy(payload: OccupancyIn):
     if payload.spacesOccupied > payload.spacesTotal:
@@ -119,14 +98,19 @@ def post_occupancy(payload: OccupancyIn):
         ts = ts.replace(tzinfo=timezone.utc)
     else:
         ts = ts.astimezone(timezone.utc)
-    rec = payload.model_dump()
-    rec["timestamp"] = ts
-    _occ_add(rec)
-    return rec
+    rec = {
+        "lotId": payload.lotId,
+        "spacesTotal": payload.spacesTotal,
+        "spacesOccupied": payload.spacesOccupied,
+        "timestamp": ts,
+    }
+    db.add_record(rec)
+    _EDGE_LAST_SEEN[payload.lotId] = ts
+    return rec  # Pydantic model handles serialization
 
 @app.get("/api/occupancy/{lot_id}/current", response_model=OccupancyOut)
 def get_current(lot_id: str):
-    latest = _occ_latest(lot_id)
+    latest = db.get_latest(lot_id)
     if not latest:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No records for lotId")
     return latest
@@ -134,4 +118,75 @@ def get_current(lot_id: str):
 @app.get("/api/occupancy/{lot_id}/history", response_model=List[OccupancyOut])
 def get_history(lot_id: str,
                 minutes: int = Query(60, ge=1, le=24*60, description="Window in minutes")):
-    return _occ_history(lot_id, minutes)
+    return db.get_history(lot_id, minutes)
+
+# ---------- Edge ingestion (Pi → server) ----------
+@app.post("/api/ingest/detections")
+def ingest_detection(d: DetectionIn):
+    # Parse timestamp
+    try:
+        ts = datetime.fromisoformat(d.ts_iso.replace("Z", "+00:00"))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Bad ts_iso: {e}")
+
+    rec = {
+        "lotId": d.lot_id,
+        "spacesTotal": d.total_spots,
+        "spacesOccupied": d.occupied_count,
+        "timestamp": ts.astimezone(timezone.utc),
+        "cameraId": d.camera_id,
+    }
+    db.add_record(rec)
+    _EDGE_LAST_SEEN[d.lot_id] = ts
+    return {"ok": True}
+
+# ---------- Unified snapshot & baseline forecast ----------
+@app.get("/api/occupancy/snapshot", response_model=SnapshotOut)
+def occupancy_snapshot(lot_id: str = Query(..., min_length=1)):
+    latest = db.get_latest(lot_id)
+    if not latest:
+        raise HTTPException(status_code=404, detail="No data yet for lot_id")
+    ts = latest["timestamp"].astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    tot = latest["spacesTotal"] or 0
+    occ = latest["spacesOccupied"] or 0
+    rate = (occ / tot) if tot else 0.0
+    return SnapshotOut(
+        lot_id=lot_id,
+        ts_iso=ts,
+        occupied_count=occ,
+        total_spots=tot,
+        occupancy_rate=float(max(0.0, min(1.0, rate))),
+    )
+
+@app.get("/api/forecast", response_model=ForecastOut)
+def get_forecast(lot_id: str = Query(..., min_length=1), hours: int = Query(12, ge=1, le=48)):
+    now = datetime.now(timezone.utc)
+    rates = db.recent_rates(lot_id, n=60)  # ~last hour if ~1/min sampling
+    if rates:
+        baseline = stats.median(rates)
+    else:
+        latest = db.get_latest(lot_id)
+        baseline = ((latest["spacesOccupied"] / latest["spacesTotal"])
+                    if latest and latest["spacesTotal"] else 0.0)
+
+    points = []
+    for h in range(1, hours + 1):
+        t = (now + timedelta(hours=h)).isoformat().replace("+00:00", "Z")
+        points.append(ForecastPoint(ts_iso=t, expected_occupancy_rate=float(max(0.0, min(1.0, baseline)))))
+    return ForecastOut(lot_id=lot_id, horizon_hours=hours, points=points)
+
+# ---------- System status (placeholder) ----------
+_SERVICE_START = datetime.now(timezone.utc)
+_EDGE_LAST_SEEN: Dict[str, datetime] = {}
+
+@app.get("/api/status", response_model=SystemStatus)
+def get_status():
+    uptime = int((datetime.now(timezone.utc) - _SERVICE_START).total_seconds())
+    recent = [t for t in _EDGE_LAST_SEEN.values() if (datetime.now(timezone.utc) - t) <= timedelta(minutes=2)]
+    last_seen = max(_EDGE_LAST_SEEN.values()).isoformat().replace("+00:00", "Z") if _EDGE_LAST_SEEN else None
+    return SystemStatus(
+        service_uptime_s=uptime,
+        edge_last_seen_iso=last_seen,
+        est_battery_pct=None,   # wire real telemetry later
+        cameras_online=len(recent),
+    )
