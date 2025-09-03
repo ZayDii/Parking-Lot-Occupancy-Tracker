@@ -326,3 +326,8 @@ html, body { overflow-x: hidden; }
     pointer-events:none;
   }
 }
+/* Right-align stacked KV values and use tabular numerals */
+.kv-stack { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; text-align: right; }
+.mono { font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1; letter-spacing: 0.2px; }
+.subtle { opacity: .8; }
+.tz { color: inherit; opacity: 1; font-weight: inherit; }

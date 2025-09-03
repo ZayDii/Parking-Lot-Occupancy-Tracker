@@ -5,6 +5,26 @@ import { getSnapshot, getForecast, getStatus } from "./api";
 const LOT_ID = "96N";
 const POLL_MS = 5000;
 
+function fmtETDateTime(iso) {
+  if (!iso) return null;
+  const d = new Date(iso);
+  const tz = 'America/New_York';
+
+  const date = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz, year: 'numeric', month: 'short', day: '2-digit'
+  }).format(d);
+
+  const time = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz, hour: 'numeric', minute: '2-digit', hour12: true
+  }).format(d);
+
+  const abbr = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz, timeZoneName: 'short'
+  }).formatToParts(d).find(p => p.type === 'timeZoneName')?.value || 'ET';
+
+  return { date, time, abbr }; // e.g. { date: "Sep 02, 2025", time: "10:20 PM", abbr: "EDT" }
+}
+
 export default function Dashboard() {
   const [snap, setSnap] = useState(null);
   const [forecast, setForecast] = useState([]);
@@ -142,7 +162,23 @@ const edgeClass = !status?.edge_last_seen_iso ? "bad" : edgeAgeMin > 15 ? "warn"
             <div style={{ display: "grid", gap: 8 }}>
               <KV label="Uptime" value={fmtUptime(status.service_uptime_s)} />
               <KV label="Cameras online" value={String(status.cameras_online)} />
-              <KV label="Edge last seen" value={status.edge_last_seen_iso || "—"} />
+              {(() => {
+  const et = status?.edge_last_seen_iso ? fmtETDateTime(status.edge_last_seen_iso) : null;
+  return (
+    <KV
+      label="Edge last seen"
+      value={
+        et ? (
+          <div className="kv-stack">
+            <div className="mono">{et.date}</div>
+            <div className="mono">
+  {et.time} <span className="tz">{et.abbr.replace('GMT','ET')}</span></div>
+          </div>
+        ) : "—"
+      }
+    />
+  );
+})()}
               <div className="badges">
   <span className={`badge ${apiOk ? "ok" : "bad"}`}><span className="dot" />API</span>
   <span className={`badge ${camsOk ? "ok" : "bad"}`}><span className="dot" />Cameras</span>
