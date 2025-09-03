@@ -74,8 +74,9 @@ export default function Dashboard() {
   const pct = useMemo(
     () => (snap ? Math.round(snap.occupancy_rate * 100) : 0),
     [snap]
+    
   );
-
+const updatedET = snap?.ts_iso ? fmtETDateTime(snap.ts_iso) : null;
 const apiOk = Boolean(status?.api_ok ?? true);
 const camsOk = Number(status?.cameras_online) > 0;
 const edgeAgeMin = status?.edge_last_seen_iso
@@ -122,21 +123,25 @@ const edgeClass = !status?.edge_last_seen_iso ? "bad" : edgeAgeMin > 15 ? "warn"
         {/* Card 1 — Now */}
         <Card title="Now">
           {snap ? (
-            <div
-              style={{
-                display: "grid",
-                gap: 12,
-                gridTemplateColumns: "minmax(120px,160px) 1fr",
-                alignItems: "center",
-              }}
-            >
+            <div className="now-grid">
               <Gauge percent={pct} />
               <div>
-                <KV label="Occupied" value={<b>{snap.occupied_count}</b>} right={` / ${snap.total_spots}`} />
+                <KV 
+                  label="Occupied"
+                  value={<><b>{snap.occupied_count}</b> / {snap.total_spots}</>}
+                  stack
+                />
                 <Progress percent={pct} />
-                <p className="subtle" style={{ marginTop: 8 }}>
-                  Updated: {snap.ts_iso}
-                </p>
+                <div className="updated">
+  <span className="updated-label">Updated:</span>
+  {updatedET ? (
+    <span className="mono">
+      {updatedET.date}<br/>
+      {updatedET.time} <span className="tz">{updatedET.abbr}</span>
+    </span>
+  ) : '—'}
+</div>
+
               </div>
             </div>
           ) : (
@@ -146,15 +151,14 @@ const edgeClass = !status?.edge_last_seen_iso ? "bad" : edgeAgeMin > 15 ? "warn"
 
         {/* Card 2 — Next 12 hours */}
         <Card title="Next 12 hours">
-          {forecast.length ? (
-            <div className="media">
-              {/* Make the SVG fill the responsive media box */}
-              <MiniBars data={forecast} />
-            </div>
-          ) : (
-            <Skeleton lines={6} />
-          )}
-        </Card>
+  {forecast.length ? (
+    <div className="media">
+      <MiniBars data={forecast} labelSize={14} /> {/* try 15 or 16 if you want it louder */}
+    </div>
+  ) : (
+    <Skeleton lines={6} />
+  )}
+</Card>
 
         {/* Card 3 — System */}
         <Card title="System">
@@ -205,13 +209,19 @@ function Card({ title, children }) {
   );
 }
 
-function KV({ label, value, right }) {
+function KV({ label, value, right, stack = false }) {
+  if (stack) {
+    return (
+      <div className="kv kv-stackrow">
+        <span className="label">{label}</span>
+        <span className="value">{value}{right ?? null}</span>
+      </div>
+    );
+  }
   return (
     <div className="kv" style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
       <span className="label" style={{ color: "var(--muted)" }}>{label}</span>
-      <span className="value">
-        {value}{right ?? null}
-      </span>
+      <span className="value">{value}{right ?? null}</span>
     </div>
   );
 }
@@ -271,8 +281,6 @@ function Gauge({ percent }) {
     <div
       className="gauge-ring"
       style={{
-        width: 140,
-        aspectRatio: "1 / 1",
         borderRadius: "50%",
         background: `conic-gradient(var(--accent) ${deg}deg, #e5e7eb 0deg)`,
         display: "grid",
@@ -282,8 +290,6 @@ function Gauge({ percent }) {
       <div
         className="gauge-inner"
         style={{
-          width: "72%",
-          aspectRatio: "1 / 1",
           borderRadius: "50%",
           background: "var(--card)",
           display: "grid",
@@ -302,19 +308,38 @@ function Gauge({ percent }) {
   );
 }
 
-function MiniBars({ data }) {
-  // ViewBox stays fixed; parent .media controls actual size.
-  const width = 420, height = 160;
-
-  // Reserve a right gutter for labels so they don't overlap bars.
-  const pad = { l: 24, r: 64, t: 12, b: 24 };
+function MiniBars({
+  data,
+  labelSize = 14,         // font size for both lines
+  tickEvery = 3,          // show every Nth tick
+  tickOffset = 20,        // vertical gap from the x-axis to first line
+  labelColor = "#cfd6e4", // time color
+  subLabelColor = "#b3bfd0", // AM/PM color
+  labelShiftX = 10,        // ← NEW: nudge x-axis labels horizontally (px). +right, -left
+  yLabelShiftX = 0        // ← NEW: nudge right-side % labels (px)
+}) {
+  const width = 420, height = 200;
+  const pad = { l: 24, r: 84, t: 14, b: Math.max(56, tickOffset + labelSize * 2 + 8) };
 
   const w = width - pad.l - pad.r;
   const h = height - pad.t - pad.b;
   const step = w / data.length;
   const bw = Math.max(6, Math.floor(step) - 6);
-
   const axisRightX = pad.l + w;
+
+  const toET = (iso) => {
+    const d = new Date(iso);
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York",
+      hour: "numeric",
+      minute: "2-digit",
+      hour12: true,
+    }).formatToParts(d);
+    const hh = parts.find(p => p.type === "hour")?.value ?? "";
+    const mm = parts.find(p => p.type === "minute")?.value ?? "";
+    const ampm = (parts.find(p => p.type === "dayPeriod")?.value ?? "").toUpperCase();
+    return { hhmm: `${hh}:${mm}`, ampm };
+  };
 
   return (
     <svg
@@ -332,61 +357,67 @@ function MiniBars({ data }) {
         x2={axisRightX}
         y2={pad.t + h}
         stroke="#e5e7eb"
-        strokeWidth="1"
+        strokeWidth="1.2"
         shapeRendering="crispEdges"
       />
 
-      {/* Bars */}
+      {/* Bars + ticks */}
       {data.map((pt, i) => {
-        const x = pad.l + i * step;
+        const slotCenterX = pad.l + (i + 0.5) * step;
+        const barX = slotCenterX - bw / 2;
         const v = Math.max(0, Math.min(1, pt.expected_occupancy_rate));
         const barH = v * h;
         const y = pad.t + (h - barH);
-        const hhmm = pt.ts_iso.slice(11, 16);
+        const { hhmm, ampm } = toET(pt.ts_iso);
+
+        // label x position (nudged)
+        const lx = slotCenterX + labelShiftX;
+
         return (
           <g key={pt.ts_iso}>
-            <rect
-              x={x}
-              y={y}
-              width={bw}
-              height={barH}
-              rx="4"
-              ry="4"
-              fill="var(--accent)"
-              opacity="0.9"
-            />
-            {i % 3 === 0 && (
+            <rect x={barX} y={y} width={bw} height={barH} rx="4" ry="4" fill="var(--accent)" opacity="0.9" />
+            {i % tickEvery === 0 && (
               <text
-                x={x + bw / 2}
-                y={pad.t + h + 16}
-                fontSize="10"
-                fill="#6b7280"
+                x={lx}
+                y={pad.t + h + tickOffset}
+                fontSize={labelSize}
                 textAnchor="middle"
+                fontWeight="600"
+                fill={labelColor}
               >
-                {hhmm}
+                <tspan x={lx} dy="0">{hhmm}</tspan>
+                <tspan x={lx} dy={labelSize} fill={subLabelColor}>{ampm}</tspan>
               </text>
             )}
           </g>
         );
       })}
 
-      {/* Y-axis labels in the right gutter (outside the plot) */}
-      {[0, 25, 50, 75, 100].map((p) => (
-        <text
-          key={p}
-          x={axisRightX + 6}           // <- outside the plot
-          y={pad.t + (h - (p / 100) * h)}
-          fontSize="10"
-          fill="#9ca3af"
-          textAnchor="start"           // align to the left edge
-          dominantBaseline="middle"
-        >
-          {p}%
-        </text>
-      ))}
+      {/* Y-axis labels (right gutter) */}
+      {[0, 25, 50, 75, 100].map((p) => {
+        const y = pad.t + (h - (p / 100) * h);
+        const x = axisRightX + 8 + yLabelShiftX;   // ← nudged
+        return (
+          <text
+            key={p}
+            x={x}
+            y={y}
+            fontSize={labelSize}
+            fill="#cfd6e4"
+            textAnchor="start"
+            dominantBaseline="middle"
+            fontWeight="600"
+          >
+            {p}%
+          </text>
+        );
+      })}
     </svg>
   );
 }
+
+
+
 
 
 /* ---------- helpers ---------- */
