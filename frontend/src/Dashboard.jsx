@@ -10,28 +10,46 @@ export default function Dashboard() {
   const [forecast, setForecast] = useState([]);
   const [status, setStatus] = useState(null);
   const [error, setError] = useState("");
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [justRefreshed, setJustRefreshed] = useState(false);
 
-  async function refresh() {
-    try {
-      const [s, f, st] = await Promise.all([
-        getSnapshot(LOT_ID),
-        getForecast(LOT_ID, 12),
-        getStatus(),
-      ]);
-      setSnap(s);
-      setForecast(f.points || []);
-      setStatus(st);
-      setError("");
-    } catch {
-      setError("Backend unavailable or no data yet.");
+
+  async function refresh(manual = false) {
+  if (manual && isRefreshing) return;      // prevent double-click spams
+  if (manual) setIsRefreshing(true);
+
+  let ok = false;
+  try {
+    const [s, f, st] = await Promise.all([
+      getSnapshot(LOT_ID),
+      getForecast(LOT_ID, 12),
+      getStatus(),
+    ]);
+    setSnap(s);
+    setForecast(f.points || []);
+    setStatus(st);
+    setError("");
+    ok = true;
+  } catch {
+    setError("Backend unavailable or no data yet.");
+  } finally {
+    if (manual) {
+      setIsRefreshing(false);
+      if (ok) {
+        setJustRefreshed(true);
+        setTimeout(() => setJustRefreshed(false), 900);
+      }
     }
   }
+}
+
 
   useEffect(() => {
-    refresh();
-    const id = setInterval(refresh, POLL_MS);
+    refresh(false);
+    const id = setInterval(() => refresh(false), POLL_MS);
     return () => clearInterval(id);
-  }, []);
+}, []);
+
 
   const pct = useMemo(
     () => (snap ? Math.round(snap.occupancy_rate * 100) : 0),
@@ -56,7 +74,22 @@ const edgeClass = !status?.edge_last_seen_iso ? "bad" : edgeAgeMin > 15 ? "warn"
           </p>
         </div>
         <div className="row">
-          <button className="btn" onClick={refresh} title="Refresh now">⟳ Refresh</button>
+         <button
+  className={`btn btn-primary btn-lg ${isRefreshing ? 'is-loading' : ''}`}
+  onClick={() => refresh(true)}
+  disabled={isRefreshing}
+  aria-busy={isRefreshing}
+  title={isRefreshing ? 'Refreshing…' : 'Refresh now'}
+>
+  {/* Use your favicon here; .svg/.png/.ico all fine */}
+  <img className="icon-img" src="/arrow.png" alt="" />
+
+  <span className="btn-label">
+    {isRefreshing ? 'Refreshing…' : justRefreshed ? 'Refreshed' : 'Refresh'}
+  </span>
+</button>
+
+
         </div>
       </header>
 
@@ -111,10 +144,10 @@ const edgeClass = !status?.edge_last_seen_iso ? "bad" : edgeAgeMin > 15 ? "warn"
               <KV label="Cameras online" value={String(status.cameras_online)} />
               <KV label="Edge last seen" value={status.edge_last_seen_iso || "—"} />
               <div className="badges">
-                <span className={`badge ${apiOk ? "ok" : "bad"}`}><span className="dot" />API</span>
-                <span className={`badge ${camsOk ? "ok" : "bad"}`}><span className="dot" />Cameras</span>
-                <span className={`badge ${edgeClass}`}><span className="dot" />Edge</span>
-              </div>
+  <span className={`badge ${apiOk ? "ok" : "bad"}`}><span className="dot" />API</span>
+  <span className={`badge ${camsOk ? "ok" : "bad"}`}><span className="dot" />Cameras</span>
+  <span className={`badge ${edgeClass}`}><span className="dot" />Edge</span>
+</div>
             </div>
           ) : (
             <Skeleton lines={4} />
