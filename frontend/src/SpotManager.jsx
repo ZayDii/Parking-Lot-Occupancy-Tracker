@@ -1,63 +1,107 @@
 import React, { useEffect, useState } from "react";
-import { getHealth, listSpots, createSpot, patchSpot } from "./api";
+import { listSpots, createSpot, patchSpot } from "./api";
 
 export default function SpotManager() {
-  const [health, setHealth] = useState("...");
   const [spots, setSpots] = useState([]);
+  const [id, setId] = useState("");
   const [label, setLabel] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  async function refresh() {
+    try {
+      const data = await listSpots();
+      setSpots(data);
+      setErr("");
+    } catch {
+      setErr("Failed to load spots.");
+    }
+  }
 
   useEffect(() => {
-    getHealth().then(d => setHealth(d.status)).catch(() => setHealth("error"));
-    listSpots().then(setSpots).catch(() => setSpots([]));
+    refresh();
   }, []);
 
-  const addSpot = async () => {
-    const id = label.trim().toLowerCase().replace(/\s+/g, "-");
-    if (!id) return;
+  async function onCreate(e) {
+    e.preventDefault();
+    if (!id.trim() || !label.trim()) return;
+    setBusy(true);
     try {
-      const created = await createSpot({ id, label, occupied: false });
-      setSpots(prev => [...prev, created]);
-      setLabel("");
-    } catch {
-      alert("Failed to create spot (maybe duplicate id?)");
+      await createSpot({ id: id.trim(), label: label.trim(), occupied: false });
+      setId(""); setLabel("");
+      await refresh();
+    } catch (e) {
+      setErr(e?.response?.data?.detail || "Create failed");
+    } finally {
+      setBusy(false);
     }
-  };
+  }
 
-  const toggle = async (id, occupied) => {
+  async function toggleOccupied(spot) {
+    setBusy(true);
     try {
-      const updated = await patchSpot(id, { id, occupied: !occupied });
-      setSpots(prev => prev.map(s => (s.id === id ? updated : s)));
-    } catch {}
-  };
+      await patchSpot(spot.id, { occupied: !spot.occupied });
+      await refresh();
+    } catch {
+      setErr("Update failed");
+    } finally {
+      setBusy(false);
+    }
+  }
 
   return (
-    <section style={{fontFamily: "system-ui, sans-serif", padding: 20, maxWidth: 1000, margin: "0 auto"}}>
-      <h2>Spot Manager</h2>
-      <p>Backend health: <strong>{health}</strong></p>
+    <section style={{ padding: 20 }}>
+      <h2 style={{ marginTop: 0 }}>Spot Manager</h2>
+      {err && <p style={{ color: "crimson" }}>{err}</p>}
 
-      <div style={{display: "flex", gap: 8, marginBottom: 16}}>
+      <form onSubmit={onCreate} style={{ display: "flex", gap: 8, marginBottom: 16 }}>
         <input
-          placeholder="New spot label (e.g., A1)"
+          placeholder="id (e.g., A1)"
+          value={id}
+          onChange={e => setId(e.target.value)}
+          style={{ padding: 8, borderRadius: 6, border: "1px solid #ddd" }}
+        />
+        <input
+          placeholder="label"
           value={label}
           onChange={e => setLabel(e.target.value)}
-          style={{padding: 8, flex: 1}}
+          style={{ padding: 8, borderRadius: 6, border: "1px solid #ddd" }}
         />
-        <button onClick={addSpot} style={{padding: 8}}>Add spot</button>
-      </div>
+        <button disabled={busy} style={{ padding: "8px 12px", borderRadius: 6 }}>
+          Add
+        </button>
+      </form>
 
-      <ul style={{listStyle: "none", padding: 0, display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 12}}>
-        {spots.map(s => (
-          <li key={s.id} style={{border: "1px solid #ddd", borderRadius: 8, padding: 12}}>
-            <div style={{display: "flex", justifyContent: "space-between", alignItems: "center"}}>
-              <strong>{s.label}</strong>
-              <span style={{fontSize: 12, opacity: 0.7}}>{s.occupied ? "Occupied" : "Free"}</span>
-            </div>
-            <button onClick={() => toggle(s.id, s.occupied)} style={{marginTop: 8, padding: 8, width: "100%"}}>
-              Toggle
-            </button>
-          </li>
-        ))}
-      </ul>
+      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+        <thead>
+          <tr>
+            <Th>ID</Th>
+            <Th>Label</Th>
+            <Th>Occupied</Th>
+            <Th>Action</Th>
+          </tr>
+        </thead>
+        <tbody>
+          {spots.map(s => (
+            <tr key={s.id} style={{ borderTop: "1px solid #eee" }}>
+              <Td>{s.id}</Td>
+              <Td>{s.label}</Td>
+              <Td>{s.occupied ? "Yes" : "No"}</Td>
+              <Td>
+                <button onClick={() => toggleOccupied(s)} disabled={busy}>
+                  Toggle
+                </button>
+              </Td>
+            </tr>
+          ))}
+          {!spots.length && (
+            <tr><Td colSpan={4} style={{ opacity: 0.7, paddingTop: 10 }}>No spots yet.</Td></tr>
+          )}
+        </tbody>
+      </table>
     </section>
   );
 }
+
+function Th({ children }) { return <th style={{ textAlign: "left", padding: 8 }}>{children}</th>; }
+function Td({ children, ...rest }) { return <td {...rest} style={{ padding: 8 }}>{children}</td>; }
