@@ -203,3 +203,50 @@ html, body { overflow-x: hidden; }
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }
 }
+
+.badges { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+
+/* Base badge */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: .2px;
+  line-height: 1;
+  border: 1px solid rgba(255,255,255,.16);
+  background: rgba(255,255,255,.06);
+  color: #e8eef6;
+}
+
+/* High-contrast status tints */
+.badge.ok {
+  color: #bff7d5;
+  background: rgba(34,197,94,.18);   /* green */
+  border-color: rgba(34,197,94,.45);
+}
+.badge.bad {
+  color: #ffc9c9;
+  background: rgba(239,68,68,.18);   /* red */
+  border-color: rgba(239,68,68,.45);
+}
+.badge.warn {
+  color: #ffe3b2;
+  background: rgba(245,158,11,.20);  /* amber */
+  border-color: rgba(245,158,11,.50);
+}
+
+/* Little status dot = instant readability */
+.badge .dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 0 2px rgba(0,0,0,.25) inset;
+}
+
+@media (max-width: 480px) {
+  .badge { font-size: 14px; padding: 8px 12px; }
+  .badge .dot { width: 10px; height: 10px; }
+}

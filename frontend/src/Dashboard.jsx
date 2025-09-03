@@ -38,6 +38,13 @@ export default function Dashboard() {
     [snap]
   );
 
+const apiOk = Boolean(status?.api_ok ?? true);
+const camsOk = Number(status?.cameras_online) > 0;
+const edgeAgeMin = status?.edge_last_seen_iso
+  ? Math.floor((Date.now() - Date.parse(status.edge_last_seen_iso)) / 60000)
+  : Infinity;
+const edgeClass = !status?.edge_last_seen_iso ? "bad" : edgeAgeMin > 15 ? "warn" : "ok";
+
   return (
     <section className="container">
       {/* Header uses the responsive toolbar pattern */}
@@ -103,10 +110,10 @@ export default function Dashboard() {
               <KV label="Uptime" value={fmtUptime(status.service_uptime_s)} />
               <KV label="Cameras online" value={String(status.cameras_online)} />
               <KV label="Edge last seen" value={status.edge_last_seen_iso || "—"} />
-              <div style={{ display: "flex", gap: 8, marginTop: 6, flexWrap: "wrap" }}>
-                <span className={`badge ${true ? "ok" : "bad"}`}>API</span>
-                <span className={`badge ${status.cameras_online ? "ok" : "bad"}`}>Cameras</span>
-                <span className={`badge ${status.edge_last_seen_iso ? "ok" : "bad"}`}>Edge</span>
+              <div className="badges">
+                <span className={`badge ${apiOk ? "ok" : "bad"}`}><span className="dot" />API</span>
+                <span className={`badge ${camsOk ? "ok" : "bad"}`}><span className="dot" />Cameras</span>
+                <span className={`badge ${edgeClass}`}><span className="dot" />Edge</span>
               </div>
             </div>
           ) : (
@@ -227,11 +234,18 @@ function Gauge({ percent }) {
 }
 
 function MiniBars({ data }) {
-  // Keep a stable viewBox so labels stay legible; let the parent "media" box control sizing.
+  // ViewBox stays fixed; parent .media controls actual size.
   const width = 420, height = 160;
-  const pad = { l: 24, r: 28, t: 10, b: 24 };
-  const w = width - pad.l - pad.r, h = height - pad.t - pad.b;
-  const bw = Math.max(6, Math.floor(w / data.length) - 6);
+
+  // Reserve a right gutter for labels so they don't overlap bars.
+  const pad = { l: 24, r: 64, t: 12, b: 24 };
+
+  const w = width - pad.l - pad.r;
+  const h = height - pad.t - pad.b;
+  const step = w / data.length;
+  const bw = Math.max(6, Math.floor(step) - 6);
+
+  const axisRightX = pad.l + w;
 
   return (
     <svg
@@ -242,16 +256,20 @@ function MiniBars({ data }) {
       height="100%"
       preserveAspectRatio="xMidYMid meet"
     >
+      {/* X-axis */}
       <line
         x1={pad.l}
         y1={pad.t + h}
-        x2={pad.l + w}
+        x2={axisRightX}
         y2={pad.t + h}
         stroke="#e5e7eb"
         strokeWidth="1"
+        shapeRendering="crispEdges"
       />
+
+      {/* Bars */}
       {data.map((pt, i) => {
-        const x = pad.l + i * (w / data.length);
+        const x = pad.l + i * step;
         const v = Math.max(0, Math.min(1, pt.expected_occupancy_rate));
         const barH = v * h;
         const y = pad.t + (h - barH);
@@ -270,10 +288,11 @@ function MiniBars({ data }) {
             />
             {i % 3 === 0 && (
               <text
-                x={x + 2}
+                x={x + bw / 2}
                 y={pad.t + h + 16}
                 fontSize="10"
                 fill="#6b7280"
+                textAnchor="middle"
               >
                 {hhmm}
               </text>
@@ -281,13 +300,17 @@ function MiniBars({ data }) {
           </g>
         );
       })}
+
+      {/* Y-axis labels in the right gutter (outside the plot) */}
       {[0, 25, 50, 75, 100].map((p) => (
         <text
           key={p}
-          x={pad.l + w + 6}
+          x={axisRightX + 6}           // <- outside the plot
           y={pad.t + (h - (p / 100) * h)}
           fontSize="10"
           fill="#9ca3af"
+          textAnchor="start"           // align to the left edge
+          dominantBaseline="middle"
         >
           {p}%
         </text>
@@ -295,6 +318,7 @@ function MiniBars({ data }) {
     </svg>
   );
 }
+
 
 /* ---------- helpers ---------- */
 function fmtUptime(s) {
