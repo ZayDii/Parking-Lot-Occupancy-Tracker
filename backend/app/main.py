@@ -5,6 +5,8 @@ from pydantic import BaseModel, Field
 from typing import List, Optional, Dict
 from datetime import datetime, timezone, timedelta
 import statistics as stats
+from fastapi.responses import RedirectResponse, HTMLResponse
+
 
 from . import db
 from .schemas import (
@@ -13,6 +15,9 @@ from .schemas import (
 )
 
 app = FastAPI(title="Parking Lot Occupancy Tracker API", version="0.2.0")
+@app.get("/", include_in_schema=False)
+def root():
+    return RedirectResponse(url="/docs")
 
 # CORS for local dev (tighten later)
 app.add_middleware(
@@ -93,11 +98,21 @@ def post_occupancy(payload: OccupancyIn):
     if payload.spacesOccupied > payload.spacesTotal:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
                             detail="spacesOccupied cannot exceed spacesTotal")
-    ts = payload.timestamp
+
+    # 1) Use server time if client omitted timestamp
+    ts = payload.timestamp or datetime.now(timezone.utc)
+
+    # 2) Normalize to UTC
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)
     else:
         ts = ts.astimezone(timezone.utc)
+
+    # 3) Ensure strictly newer than the current latest so /snapshot updates
+    latest = db.get_latest(payload.lotId)
+    if latest and ts <= latest["timestamp"]:
+        ts = latest["timestamp"] + timedelta(seconds=1)
+
     rec = {
         "lotId": payload.lotId,
         "spacesTotal": payload.spacesTotal,
@@ -106,7 +121,7 @@ def post_occupancy(payload: OccupancyIn):
     }
     db.add_record(rec)
     _EDGE_LAST_SEEN[payload.lotId] = ts
-    return rec  # Pydantic model handles serialization
+    return rec
 
 @app.get("/api/occupancy/{lot_id}/current", response_model=OccupancyOut)
 def get_current(lot_id: str):
@@ -145,7 +160,16 @@ def ingest_detection(d: DetectionIn):
 def occupancy_snapshot(lot_id: str = Query(..., min_length=1)):
     latest = db.get_latest(lot_id)
     if not latest:
-        raise HTTPException(status_code=404, detail="No data yet for lot_id")
+        # return a neutral snapshot instead of 404
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        return SnapshotOut(
+            lot_id=lot_id,
+            ts_iso=now,
+            occupied_count=0,
+            total_spots=0,
+            occupancy_rate=0.0,
+        )
+
     ts = latest["timestamp"].astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
     tot = latest["spacesTotal"] or 0
     occ = latest["spacesOccupied"] or 0
@@ -157,6 +181,7 @@ def occupancy_snapshot(lot_id: str = Query(..., min_length=1)):
         total_spots=tot,
         occupancy_rate=float(max(0.0, min(1.0, rate))),
     )
+
 
 @app.get("/api/forecast", response_model=ForecastOut)
 def get_forecast(lot_id: str = Query(..., min_length=1), hours: int = Query(12, ge=1, le=48)):

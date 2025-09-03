@@ -7,11 +7,22 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra='forbid')
 
 # --- Occupancy payloads used by /api/occupancy (camelCase kept) ---
-class OccupancyIn(StrictModel):
-    lotId: str = Field(..., min_length=1)
-    spacesTotal: int = Field(..., gt=0)   # was ge=0; change to gt=0 for safety
-    spacesOccupied: int = Field(..., ge=0)
-    timestamp: datetime  # should be UTC; server normalizes to UTC
+class OccupancyIn(BaseModel):
+    lotId: str
+    spacesTotal: int
+    spacesOccupied: int
+    timestamp: Optional[datetime] = Field(
+        default=None,
+        description="Optional; server uses current UTC if omitted."
+    )
+    # Make Swagger show a no-timestamp example
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "lotId": "96N",
+            "spacesTotal": 50,
+            "spacesOccupied": 15
+        }
+    })
 
 class OccupancyOut(OccupancyIn):
     pass
