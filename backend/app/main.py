@@ -1,4 +1,13 @@
 # backend/app/main.py
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Only load .env if DATABASE_URL not already set (so prod uses real env)
+if not os.getenv("DATABASE_URL"):
+    load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env")
+
+
 from fastapi import FastAPI, HTTPException, status, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -7,12 +16,14 @@ from datetime import datetime, timezone, timedelta
 import statistics as stats
 from fastapi.responses import RedirectResponse, HTMLResponse
 
-
-from . import db
+from . import db_sql as db
 from .schemas import (
     OccupancyIn, OccupancyOut, DetectionIn,
     SnapshotOut, ForecastOut, ForecastPoint, SystemStatus
 )
+
+# ---- load env early (dev) ----
+
 
 app = FastAPI(title="Parking Lot Occupancy Tracker API", version="0.2.0")
 @app.get("/", include_in_schema=False)

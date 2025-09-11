@@ -6,6 +6,8 @@
 __pycache__/
 .env
 .venv/
+backend/.env
+.env
 .env.*
 node_modules/
 dist/
