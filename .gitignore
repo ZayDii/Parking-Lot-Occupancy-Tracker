@@ -14,3 +14,8 @@ dist/
 build/
 # VSCode
 .vscode/
+.serverless
+node_modules
+venv
+__pycache__/
+*.pyc

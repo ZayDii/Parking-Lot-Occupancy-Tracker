@@ -12,8 +12,15 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)) + "/..")
 # --- Load environment variables (DATABASE_URL) ---
 # This assumes your .env is at backend/.env. If you keep it in backend/app/.env,
 # change the path below to ("..", "app", ".env")
-from dotenv import load_dotenv
-load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
+
+from pathlib import Path
+
+if not os.getenv("DATABASE_URL"):
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env")
+    except ModuleNotFoundError:
+        pass
 
 # --- Import your SQLAlchemy Base metadata ---
 from app.models import Base  # noqa: E402
