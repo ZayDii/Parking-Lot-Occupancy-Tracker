@@ -1,0 +1,157 @@
+{
+  "C:\\Users\\zay14\\Parking-Lot-Occupancy-Tracker\\serverless.yml": {
+    "versionFramework": "4.19.1",
+    "servicePath": "C:\\Users\\zay14\\Parking-Lot-Occupancy-Tracker\\serverless.yml",
+    "serviceConfigFileName": "serverless.yml",
+    "service": {
+      "service": "parking-api",
+      "frameworkVersion": "4",
+      "provider": {
+        "name": "aws",
+        "runtime": "python3.11",
+        "region": "us-east-1",
+        "architecture": "x86_64",
+        "memorySize": 512,
+        "timeout": 10,
+        "environment": {
+          "DATABASE_URL": "postgresql+psycopg2://neondb_owner:npg_mFCp4X5HTrgI@ep-mute-mountain-advdim8q-pooler.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require"
+        },
+        "stage": "dev",
+        "versionFunctions": true
+      },
+      "functions": {
+        "api": {
+          "handler": "backend/app/main.handler",
+          "events": [
+            {
+              "httpApi": {
+                "path": "/{proxy+}",
+                "method": "ANY"
+              },
+              "resolvedMethod": "ANY",
+              "resolvedPath": "/{proxy+}"
+            }
+          ],
+          "layers": [
+            {
+              "Ref": "PythonRequirementsLambdaLayer"
+            }
+          ],
+          "name": "parking-api-dev-api"
+        }
+      },
+      "plugins": [
+        "serverless-python-requirements"
+      ],
+      "custom": {
+        "pythonRequirements": {
+          "fileName": "requirements.txt",
+          "dockerizePip": true,
+          "slim": false,
+          "strip": false,
+          "layer": true,
+          "invalidateCaches": true,
+          "pipCmdExtraArgs": [
+            "--no-cache-dir",
+            "--upgrade",
+            "--force-reinstall"
+          ]
+        }
+      },
+      "package": {
+        "patterns": [
+          "backend/**",
+          "requirements.txt",
+          "!backend/alembic/**",
+          "!**/__pycache__/**",
+          "!**/*.pyc",
+          "!node_modules/**",
+          "!venv/**"
+        ],
+        "artifactsS3KeyDirname": "serverless/parking-api/dev/code-artifacts"
+      }
+    },
+    "provider": {
+      "name": "aws",
+      "runtime": "python3.11",
+      "region": "us-east-1",
+      "architecture": "x86_64",
+      "memorySize": 512,
+      "timeout": 10,
+      "environment": {
+        "DATABASE_URL": "postgresql+psycopg2://neondb_owner:npg_mFCp4X5HTrgI@ep-mute-mountain-advdim8q-pooler.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require"
+      },
+      "stage": "dev",
+      "versionFunctions": true
+    },
+    "dashboard": {
+      "isEnabledForService": false,
+      "requiredAuthentication": false,
+      "orgFeaturesInUse": null,
+      "orgObservabilityIntegrations": null,
+      "serviceAppId": null,
+      "serviceProvider": null,
+      "instanceParameters": null
+    },
+    "serviceRawFile": "service: parking-api\r\nframeworkVersion: '4'\r\n\r\nprovider:\r\n  name: aws\r\n  runtime: python3.11\r\n  region: us-east-1\r\n  architecture: x86_64           # ensure x86 to match built wheels\r\n  memorySize: 512\r\n  timeout: 10\r\n  environment:\r\n    DATABASE_URL: ${aws:ssm:/parking/DATABASE_URL}\r\n\r\nfunctions:\r\n  api:\r\n    handler: backend/app/main.handler\r\n    events:\r\n      - httpApi:\r\n          path: /{proxy+}\r\n          method: ANY\r\n    # EXPlicitly attach the deps layer the plugin creates:\r\n    layers:\r\n      - { Ref: PythonRequirementsLambdaLayer }\r\n\r\nplugins:\r\n  - serverless-python-requirements\r\n\r\ncustom:\r\n  pythonRequirements:\r\n    fileName: requirements.txt    # at repo root\r\n    dockerizePip: true            # build Amazon Linux wheels (requires Docker Desktop running)\r\n    slim: false\r\n    strip: false                  # keep native .so (pydantic-core)\r\n    layer: true                   # build a dedicated Lambda Layer with deps\r\n    invalidateCaches: true\r\n    pipCmdExtraArgs:\r\n      - --no-cache-dir\r\n      - --upgrade\r\n      - --force-reinstall\r\n\r\npackage:\r\n  patterns:\r\n    - backend/**                  # your app code only\r\n    - requirements.txt\r\n    - '!backend/alembic/**'       # optional: exclude migrations\r\n    - '!**/__pycache__/**'\r\n    - '!**/*.pyc'\r\n    - '!node_modules/**'\r\n    - '!venv/**'",
+    "command": [
+      "info"
+    ],
+    "options": {
+      "stage": "dev"
+    },
+    "orgId": "b8cc00fc-351c-44e4-85a8-97cba2095902",
+    "orgName": "group22occupancytracker",
+    "userId": "9tkG7J1SBGfxkDH8xL",
+    "userName": "group22occupancytracker",
+    "serviceProviderAwsAccountId": "875705318352",
+    "serviceProviderAwsCfStackName": "parking-api-dev",
+    "serviceProviderAwsCfStackId": "arn:aws:cloudformation:us-east-1:875705318352:stack/parking-api-dev/fd6d3310-98da-11f0-a632-0e7ce1951fdd",
+    "serviceProviderAwsCfStackCreated": "2025-09-24T00:11:17.166Z",
+    "serviceProviderAwsCfStackUpdated": "2025-09-24T20:16:45.252Z",
+    "serviceProviderAwsCfStackStatus": "UPDATE_COMPLETE",
+    "serviceProviderAwsCfStackOutputs": [
+      {
+        "OutputKey": "PythonRequirementsLambdaLayerS3Key",
+        "OutputValue": "serverless/parking-api/dev/1758742471349-2025-09-24T19:34:31.349Z/pythonRequirements.zip",
+        "Description": "Current Lambda layer S3Key",
+        "ExportName": "sls-parking-api-dev-PythonRequirementsLambdaLayerS3Key"
+      },
+      {
+        "OutputKey": "PythonRequirementsLambdaLayerQualifiedArn",
+        "OutputValue": "arn:aws:lambda:us-east-1:875705318352:layer:parking-api-dev-python-requirements:4",
+        "Description": "Current Lambda layer version",
+        "ExportName": "sls-parking-api-dev-PythonRequirementsLambdaLayerQualifiedArn"
+      },
+      {
+        "OutputKey": "ApiLambdaFunctionQualifiedArn",
+        "OutputValue": "arn:aws:lambda:us-east-1:875705318352:function:parking-api-dev-api:13",
+        "Description": "Current Lambda function version",
+        "ExportName": "sls-parking-api-dev-ApiLambdaFunctionQualifiedArn"
+      },
+      {
+        "OutputKey": "HttpApiId",
+        "OutputValue": "vn0nnu5rd2",
+        "Description": "Id of the HTTP API",
+        "ExportName": "sls-parking-api-dev-HttpApiId"
+      },
+      {
+        "OutputKey": "PythonRequirementsLambdaLayerHash",
+        "OutputValue": "fe53a0e018fe5f6ff0b7f2e8dcffaffa8e831552",
+        "Description": "Current Lambda layer hash",
+        "ExportName": "sls-parking-api-dev-PythonRequirementsLambdaLayerHash"
+      },
+      {
+        "OutputKey": "ServerlessDeploymentBucketName",
+        "OutputValue": "serverless-framework-deployments-us-east-1-25ee873d-e9ea",
+        "ExportName": "sls-parking-api-dev-ServerlessDeploymentBucketName"
+      },
+      {
+        "OutputKey": "HttpApiUrl",
+        "OutputValue": "https://vn0nnu5rd2.execute-api.us-east-1.amazonaws.com",
+        "Description": "URL of the HTTP API",
+        "ExportName": "sls-parking-api-dev-HttpApiUrl"
+      }
+    ]
+  }
+}

@@ -1,0 +1,11 @@
+SQLAlchemy==2.0.22
+alembic==1.11.1
+email-validator==2.2.0       # ok to keep explicit too
+fastapi==0.111.0
+mangum==0.19.0
+psycopg2-binary==2.9.9
+pydantic[email]==2.8.2       # ← use the "email" extra (pulls email-validator correctly)
+python-dotenv==1.1.1
+python-multipart==0.0.9
+typing-extensions==4.12.2
+uvicorn[standard]==0.30.0

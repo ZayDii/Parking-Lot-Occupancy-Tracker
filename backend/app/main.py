@@ -1,31 +1,37 @@
 # backend/app/main.py
 import os
 from pathlib import Path
-from dotenv import load_dotenv
+from datetime import datetime, timezone, timedelta
+from typing import List, Optional, Dict
+import statistics as stats
+import logging
+import traceback
 
-# Only load .env if DATABASE_URL not already set (so prod uses real env)
+# ---- logging ---------------------------------------------------------------
+logger = logging.getLogger("app")
+logger.setLevel(logging.INFO)
+
+# Load .env only if DATABASE_URL isn't already set (local dev); skip if dotenv not installed
 if not os.getenv("DATABASE_URL"):
-    load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env")
-
+    try:
+        from dotenv import load_dotenv  # dev-only
+        load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env")
+    except ModuleNotFoundError:
+        pass
 
 from fastapi import FastAPI, HTTPException, status, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
-from typing import List, Optional, Dict
-from datetime import datetime, timezone, timedelta
-import statistics as stats
-from fastapi.responses import RedirectResponse, HTMLResponse
+from fastapi.responses import RedirectResponse
 
 from . import db_sql as db
+from pydantic import BaseModel, Field
 from .schemas import (
     OccupancyIn, OccupancyOut, DetectionIn,
     SnapshotOut, ForecastOut, ForecastPoint, SystemStatus
 )
 
-# ---- load env early (dev) ----
-
-
 app = FastAPI(title="Parking Lot Occupancy Tracker API", version="0.2.0")
+
 @app.get("/", include_in_schema=False)
 def root():
     return RedirectResponse(url="/docs")
@@ -58,15 +64,6 @@ class Spot(SpotBase):
 
 # In-memory store (replace with DB later)
 _SPOTS: Dict[str, Spot] = {}
-
-# ---------- Health ----------
-@app.get("/health")
-def health():
-    return {"status": "ok"}
-
-@app.get("/api/health")
-def api_health():
-    return {"status": "ok", "service": "backend"}
 
 # ---------- Spots CRUD ----------
 @app.get("/api/spots", response_model=List[Spot])
@@ -103,7 +100,7 @@ def delete_spot(spot_id: str):
     del _SPOTS[spot_id]
     return None
 
-# ---------- Occupancy time-series (your existing shapes) ----------
+# ---------- Occupancy time-series ----------
 @app.post("/api/occupancy", response_model=OccupancyOut, status_code=status.HTTP_201_CREATED)
 def post_occupancy(payload: OccupancyIn):
     if payload.spacesOccupied > payload.spacesTotal:
@@ -162,9 +159,14 @@ def ingest_detection(d: DetectionIn):
         "timestamp": ts.astimezone(timezone.utc),
         "cameraId": d.camera_id,
     }
-    db.add_record(rec)
-    _EDGE_LAST_SEEN[d.lot_id] = ts
-    return {"ok": True}
+
+    try:
+        db.add_record(rec)
+        _EDGE_LAST_SEEN[d.lot_id] = ts
+        return {"ok": True}
+    except Exception as e:
+        logger.error("add_record failed: %s\n%s", e, traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"DB write failed: {e}")
 
 # ---------- Unified snapshot & baseline forecast ----------
 @app.get("/api/occupancy/snapshot", response_model=SnapshotOut)
@@ -193,10 +195,10 @@ def occupancy_snapshot(lot_id: str = Query(..., min_length=1)):
         occupancy_rate=float(max(0.0, min(1.0, rate))),
     )
 
-
 @app.get("/api/forecast", response_model=ForecastOut)
 def get_forecast(lot_id: str = Query(..., min_length=1), hours: int = Query(12, ge=1, le=48)):
     now = datetime.now(timezone.utc)
+    # NOTE: ensure db_sql.py defines recent_rates(...) or this will raise AttributeError.
     rates = db.recent_rates(lot_id, n=60)  # ~last hour if ~1/min sampling
     if rates:
         baseline = stats.median(rates)
@@ -226,3 +228,6 @@ def get_status():
         est_battery_pct=None,   # wire real telemetry later
         cameras_online=len(recent),
     )
+
+from mangum import Mangum
+handler = Mangum(app)

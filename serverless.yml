@@ -1,0 +1,49 @@
+service: parking-api
+frameworkVersion: '4'
+
+provider:
+  name: aws
+  runtime: python3.11
+  region: us-east-1
+  architecture: x86_64           # ensure x86 to match built wheels
+  memorySize: 512
+  timeout: 10
+  environment:
+    DATABASE_URL: ${aws:ssm:/parking/DATABASE_URL}
+
+functions:
+  api:
+    handler: backend/app/main.handler
+    events:
+      - httpApi:
+          path: /{proxy+}
+          method: ANY
+    # EXPlicitly attach the deps layer the plugin creates:
+    layers:
+      - { Ref: PythonRequirementsLambdaLayer }
+
+plugins:
+  - serverless-python-requirements
+
+custom:
+  pythonRequirements:
+    fileName: requirements.txt    # at repo root
+    dockerizePip: true            # build Amazon Linux wheels (requires Docker Desktop running)
+    slim: false
+    strip: false                  # keep native .so (pydantic-core)
+    layer: true                   # build a dedicated Lambda Layer with deps
+    invalidateCaches: true
+    pipCmdExtraArgs:
+      - --no-cache-dir
+      - --upgrade
+      - --force-reinstall
+
+package:
+  patterns:
+    - backend/**                  # your app code only
+    - requirements.txt
+    - '!backend/alembic/**'       # optional: exclude migrations
+    - '!**/__pycache__/**'
+    - '!**/*.pyc'
+    - '!node_modules/**'
+    - '!venv/**'
