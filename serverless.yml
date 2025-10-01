@@ -5,11 +5,42 @@ provider:
   name: aws
   runtime: python3.11
   region: us-east-1
-  architecture: x86_64           # ensure x86 to match built wheels
+  architecture: x86_64
   memorySize: 512
   timeout: 10
   environment:
     DATABASE_URL: ${aws:ssm:/parking/DATABASE_URL}
+
+plugins:
+  - serverless-python-requirements
+
+custom:
+  pythonRequirements:
+    fileName: requirements.txt        # at repo root
+    dockerizePip: true                # needs Docker Desktop running; set to false if you don't have it
+    slim: false
+    strip: false                      # keep native libs (e.g., pydantic-core)
+    layer: true                       # put deps in a dedicated Lambda Layer
+    invalidateCaches: true
+    pipCmdExtraArgs:
+      - --no-cache-dir
+      - --upgrade
+      - --force-reinstall
+
+package:
+  individually: true                  # package each function separately
+  # Global excludes (belt-and-suspenders)
+  patterns:
+    - '!frontend/**'
+    - '!**/.git/**'
+    - '!**/.github/**'
+    - '!**/.serverless/**'
+    - '!**/__pycache__/**'
+    - '!**/.pytest_cache/**'
+    - '!**/tests/**'
+    - '!**/node_modules/**'
+    - '!**/*.map'
+    - '!**/*.log'
 
 functions:
   api:
@@ -18,32 +49,11 @@ functions:
       - httpApi:
           path: /{proxy+}
           method: ANY
-    # EXPlicitly attach the deps layer the plugin creates:
     layers:
       - { Ref: PythonRequirementsLambdaLayer }
-
-plugins:
-  - serverless-python-requirements
-
-custom:
-  pythonRequirements:
-    fileName: requirements.txt    # at repo root
-    dockerizePip: true            # build Amazon Linux wheels (requires Docker Desktop running)
-    slim: false
-    strip: false                  # keep native .so (pydantic-core)
-    layer: true                   # build a dedicated Lambda Layer with deps
-    invalidateCaches: true
-    pipCmdExtraArgs:
-      - --no-cache-dir
-      - --upgrade
-      - --force-reinstall
-
-package:
-  patterns:
-    - backend/**                  # your app code only
-    - requirements.txt
-    - '!backend/alembic/**'       # optional: exclude migrations
-    - '!**/__pycache__/**'
-    - '!**/*.pyc'
-    - '!node_modules/**'
-    - '!venv/**'
+    # Function-level packaging: exclude everything, then explicitly include backend
+    package:
+      patterns:
+        - '!**/*'            # start from empty
+        - 'backend/**'       # include only backend app code
+        # (requirements.txt is NOT needed in the function bundle since deps are in the layer)
