@@ -9,7 +9,7 @@ const api = axios.create({
 });
 
 // --- health & spots ---
-export const getHealth   = () => api.get("/api/health").then(r => r.data);
+// export const getHealth   = () => api.get("/api/health").then(r => r.data);
 export const listSpots   = () => api.get("/api/spots").then(r => r.data);
 export const createSpot  = (spot) => api.post("/api/spots", spot).then(r => r.data);
 export const patchSpot   = (id, body) => api.patch(`/api/spots/${id}`, body).then(r => r.data);

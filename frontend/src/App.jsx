@@ -2,6 +2,8 @@ import React, { useEffect, useState } from "react";
 import Dashboard from "./Dashboard";
 import SpotManager from "./SpotManager";
 
+const API_BASE = (import.meta?.env?.VITE_API_BASE || "").replace(/\/+$/, "");
+
 function SpotsTable({ spots }) {
   return (
     <table className="table">
@@ -37,19 +39,20 @@ export default function App() {
   const [spots, setSpots] = useState([]);
 
   useEffect(() => {
-    fetch("/api/health")
+    // Replaces deprecated /api/health with /api/status
+    fetch(`${API_BASE}/api/status`)
       .then(r => r.json())
-      .then(d => setHealth(d.status))
+      .then(d => setHealth(String(d?.status ?? "ok")))
       .catch(() => setHealth("error"));
 
-    fetch("/api/spots")
+    fetch(`${API_BASE}/api/spots`)
       .then(r => r.json())
       .then(setSpots)
       .catch(() => setSpots([]));
   }, []);
 
   const refreshSpots = () => {
-    fetch("/api/spots")
+    fetch(`${API_BASE}/api/spots`)
       .then(r => r.json())
       .then(setSpots)
       .catch(() => {});
@@ -60,7 +63,7 @@ export default function App() {
       <header style={{ padding: 20, borderBottom: "1px solid #eee" }}>
         <h1 style={{ margin: 0 }}>Parking Lot Occupancy Tracker</h1>
         <p style={{ margin: "6px 0 0", opacity: 0.8 }}>
-          API health: <b>{String(health)}</b>
+          API status: <b>{String(health)}</b>
         </p>
       </header>
 
@@ -80,4 +83,3 @@ export default function App() {
     </div>
   );
 }
-
