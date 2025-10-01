@@ -11,6 +11,10 @@ import traceback
 logger = logging.getLogger("app")
 logger.setLevel(logging.INFO)
 
+# === constants ===
+TOTAL_SPOTS = 77
+SPOT_COUNTS = {"regular": 73, "handicapped": 4}
+
 # Load .env only if DATABASE_URL isn't already set (local dev); skip if dotenv not installed
 if not os.getenv("DATABASE_URL"):
     try:
@@ -146,24 +150,48 @@ def get_history(lot_id: str,
 # ---------- Edge ingestion (Pi → server) ----------
 @app.post("/api/ingest/detections")
 def ingest_detection(d: DetectionIn):
-    # Parse timestamp
+    """
+    Normalize edge payloads:
+      - Ignore incoming total_spots; enforce canonical TOTAL_SPOTS.
+      - Clamp occupied_count to [0, TOTAL_SPOTS].
+      - Parse ISO timestamp and store as UTC.
+    """
+    # 1) Parse timestamp (accepts ...Z or offset form)
     try:
-        ts = datetime.fromisoformat(d.ts_iso.replace("Z", "+00:00"))
+        ts_utc = datetime.fromisoformat(d.ts_iso.replace("Z", "+00:00")).astimezone(timezone.utc)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Bad ts_iso: {e}")
 
+    # 2) Enforce canonical totals and clamp occupied
+    total = TOTAL_SPOTS  # <-- single source of truth
+    try:
+        occ = int(d.occupied_count)
+    except Exception:
+        raise HTTPException(status_code=400, detail="occupied_count must be an integer")
+
+    if occ < 0:
+        logger.warning("ingest_detection: negative occupied_count %s; clamping to 0", occ)
+        occ = 0
+    if occ > total:
+        logger.warning(
+            "ingest_detection: occupied_count %s exceeds TOTAL_SPOTS %s; clamping",
+            occ, total
+        )
+        occ = total
+
+    # 3) Persist normalized record
     rec = {
         "lotId": d.lot_id,
-        "spacesTotal": d.total_spots,
-        "spacesOccupied": d.occupied_count,
-        "timestamp": ts.astimezone(timezone.utc),
+        "spacesTotal": total,          # <-- enforced
+        "spacesOccupied": occ,         # <-- clamped
+        "timestamp": ts_utc,           # <-- UTC
         "cameraId": d.camera_id,
     }
 
     try:
         db.add_record(rec)
-        _EDGE_LAST_SEEN[d.lot_id] = ts
-        return {"ok": True}
+        _EDGE_LAST_SEEN[d.lot_id] = ts_utc
+        return {"ok": True, "lot_id": d.lot_id, "occupied_count": occ, "total_spots": total}
     except Exception as e:
         logger.error("add_record failed: %s\n%s", e, traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"DB write failed: {e}")
