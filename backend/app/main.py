@@ -1,4 +1,3 @@
-# backend/app/main.py
 import os
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
@@ -152,18 +151,19 @@ def get_history(lot_id: str,
 def ingest_detection(d: DetectionIn):
     """
     Normalize edge payloads:
-      - Ignore incoming total_spots; enforce canonical TOTAL_SPOTS.
+      - Enforce canonical total spots (TOTAL_SPOTS).
       - Clamp occupied_count to [0, TOTAL_SPOTS].
       - Parse ISO timestamp and store as UTC.
+      - Ensure strictly monotonic timestamps (so snapshot updates).
     """
-    # 1) Parse timestamp (accepts ...Z or offset form)
+    # 1) Parse timestamp
     try:
         ts_utc = datetime.fromisoformat(d.ts_iso.replace("Z", "+00:00")).astimezone(timezone.utc)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Bad ts_iso: {e}")
 
-    # 2) Enforce canonical totals and clamp occupied
-    total = TOTAL_SPOTS  # <-- single source of truth
+    # 2) Enforce totals and clamp occupied
+    total = TOTAL_SPOTS
     try:
         occ = int(d.occupied_count)
     except Exception:
@@ -173,25 +173,33 @@ def ingest_detection(d: DetectionIn):
         logger.warning("ingest_detection: negative occupied_count %s; clamping to 0", occ)
         occ = 0
     if occ > total:
-        logger.warning(
-            "ingest_detection: occupied_count %s exceeds TOTAL_SPOTS %s; clamping",
-            occ, total
-        )
+        logger.warning("ingest_detection: occupied_count %s exceeds TOTAL_SPOTS %s; clamping", occ, total)
         occ = total
 
-    # 3) Persist normalized record
+    # 3) Make timestamp strictly newer than last write for this lot
+    latest = db.get_latest(d.lot_id)
+    if latest and ts_utc <= latest["timestamp"]:
+        ts_utc = latest["timestamp"] + timedelta(seconds=1)
+
+    # 4) Persist normalized record
     rec = {
         "lotId": d.lot_id,
-        "spacesTotal": total,          # <-- enforced
-        "spacesOccupied": occ,         # <-- clamped
-        "timestamp": ts_utc,           # <-- UTC
+        "spacesTotal": total,      # canonical
+        "spacesOccupied": occ,     # clamped
+        "timestamp": ts_utc,       # UTC
         "cameraId": d.camera_id,
     }
 
     try:
         db.add_record(rec)
         _EDGE_LAST_SEEN[d.lot_id] = ts_utc
-        return {"ok": True, "lot_id": d.lot_id, "occupied_count": occ, "total_spots": total}
+        return {
+            "ok": True,
+            "lot_id": d.lot_id,
+            "occupied_count": occ,
+            "total_spots": total,
+            "ts_iso": ts_utc.isoformat().replace("+00:00", "Z"),
+        }
     except Exception as e:
         logger.error("add_record failed: %s\n%s", e, traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"DB write failed: {e}")
@@ -201,20 +209,21 @@ def ingest_detection(d: DetectionIn):
 def occupancy_snapshot(lot_id: str = Query(..., min_length=1)):
     latest = db.get_latest(lot_id)
     if not latest:
-        # return a neutral snapshot instead of 404
+        # Cold start: show canonical capacity with 0 occupied
         now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         return SnapshotOut(
             lot_id=lot_id,
             ts_iso=now,
             occupied_count=0,
-            total_spots=0,
+            total_spots=TOTAL_SPOTS,
             occupancy_rate=0.0,
         )
 
     ts = latest["timestamp"].astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-    tot = latest["spacesTotal"] or 0
-    occ = latest["spacesOccupied"] or 0
+    occ = int(latest.get("spacesOccupied", 0) or 0)
+    tot = TOTAL_SPOTS  # enforce canonical total in responses
     rate = (occ / tot) if tot else 0.0
+
     return SnapshotOut(
         lot_id=lot_id,
         ts_iso=ts,
@@ -226,19 +235,24 @@ def occupancy_snapshot(lot_id: str = Query(..., min_length=1)):
 @app.get("/api/forecast", response_model=ForecastOut)
 def get_forecast(lot_id: str = Query(..., min_length=1), hours: int = Query(12, ge=1, le=48)):
     now = datetime.now(timezone.utc)
-    # NOTE: ensure db_sql.py defines recent_rates(...) or this will raise AttributeError.
+
+    # If you store rates directly (0..1), median is fine.
+    # If recent_rates returns occupancy ratios, they already reflect TOTAL_SPOTS.
     rates = db.recent_rates(lot_id, n=60)  # ~last hour if ~1/min sampling
     if rates:
         baseline = stats.median(rates)
     else:
         latest = db.get_latest(lot_id)
-        baseline = ((latest["spacesOccupied"] / latest["spacesTotal"])
-                    if latest and latest["spacesTotal"] else 0.0)
+        occ = int(latest["spacesOccupied"]) if latest and latest.get("spacesOccupied") is not None else 0
+        baseline = (occ / TOTAL_SPOTS) if TOTAL_SPOTS else 0.0
+
+    baseline = float(max(0.0, min(1.0, baseline)))
 
     points = []
     for h in range(1, hours + 1):
         t = (now + timedelta(hours=h)).isoformat().replace("+00:00", "Z")
-        points.append(ForecastPoint(ts_iso=t, expected_occupancy_rate=float(max(0.0, min(1.0, baseline)))))
+        points.append(ForecastPoint(ts_iso=t, expected_occupancy_rate=baseline))
+
     return ForecastOut(lot_id=lot_id, horizon_hours=hours, points=points)
 
 # ---------- System status (placeholder) ----------
