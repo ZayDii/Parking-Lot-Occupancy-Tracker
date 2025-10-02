@@ -8,12 +8,6 @@ const api = axios.create({
   headers: { "Content-Type": "application/json" },
 });
 
-// --- health & spots ---
-// export const getHealth   = () => api.get("/api/health").then(r => r.data);
-export const listSpots   = () => api.get("/api/spots").then(r => r.data);
-export const createSpot  = (spot) => api.post("/api/spots", spot).then(r => r.data);
-export const patchSpot   = (id, body) => api.patch(`/api/spots/${id}`, body).then(r => r.data);
-
 // --- occupancy (same shapes as before: camelCase body) ---
 export const postOccupancy = (rec) => api.post("/api/occupancy", rec).then(r => r.data);
 export const getCurrent    = (lotId) => api.get(`/api/occupancy/${lotId}/current`).then(r => r.data);
