@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import Dashboard from "./Dashboard";
 import SpotManager from "./SpotManager";
 
-const API_BASE = (import.meta?.env?.VITE_API_BASE || "").replace(/\/+$/, "");
+const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/+$/, "");
 
 function SpotsTable({ spots }) {
   return (
