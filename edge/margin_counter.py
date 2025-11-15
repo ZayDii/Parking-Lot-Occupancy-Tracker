@@ -25,7 +25,7 @@ import argparse, os, json, time, math, io
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
-
+from picamera2 import Picamera2
 import cv2
 import numpy as np
 from ultralytics import YOLO
@@ -73,6 +73,16 @@ class Gate:
 def main():
     ap = argparse.ArgumentParser()
 
+
+    # UI
+    ap.add_argument("--display", action="store_true")
+    ap.add_argument("--save_annot", type=str, default="")
+    ap.add_argument("--show_labels", action="store_true")
+
+    # Orientation fixes
+    ap.add_argument("--vflip", action="store_true", help="Flip frame vertically")
+    ap.add_argument("--hflip", action="store_true", help="Flip frame horizontally")
+
     # IO / model
     ap.add_argument("--source", default=0)
     ap.add_argument("--model", default="yolov8s.pt")
@@ -87,16 +97,16 @@ def main():
     ap.add_argument("--hw", choices=["cpu","hailo"], default="cpu")
     ap.add_argument("--target_fps", type=float, default=15.0)
 
-    # Gates defaults (match prior usage)
-    ap.add_argument("--g1_A", type=int, default=5)
-    ap.add_argument("--g1_B", type=int, default=13)
-    ap.add_argument("--g1_xmin", type=int, default=561)
-    ap.add_argument("--g1_xmax", type=int, default=631)
+    # Gates defaults
+    ap.add_argument("--g1_A", type=int, default=85)
+    ap.add_argument("--g1_B", type=int, default=124)
+    ap.add_argument("--g1_xmin", type=int, default=484)
+    ap.add_argument("--g1_xmax", type=int, default=573)
 
-    ap.add_argument("--g2_A", type=int, default=9)
-    ap.add_argument("--g2_B", type=int, default=23)
-    ap.add_argument("--g2_xmin", type=int, default=1283)
-    ap.add_argument("--g2_xmax", type=int, default=1352)
+    ap.add_argument("--g2_A", type=int, default=109)
+    ap.add_argument("--g2_B", type=int, default=153)
+    ap.add_argument("--g2_xmin", type=int, default=1464)
+    ap.add_argument("--g2_xmax", type=int, default=1558)
 
     # Counting logic
     ap.add_argument("--yref", choices=["center","top","topq","bottom"], default="topq")
@@ -123,13 +133,13 @@ def main():
     ap.add_argument("--snapshots", action="store_true", help="save crop on each +1/-1 to ./events")
 
     # UI
-    ap.add_argument("--display", action="store_true")
-    ap.add_argument("--save_annot", type=str, default="")
-    ap.add_argument("--show_labels", action="store_true")
+    # ap.add_argument("--display", action="store_true")
+    # ap.add_argument("--save_annot", type=str, default="")
+    # ap.add_argument("--show_labels", action="store_true")
 
     # JSON config override
     ap.add_argument("--config", type=str, default="edge_config.json")
-    
+
     # Other
     ap.add_argument("--implied_seq", action="store_true",
                                         help="Allow first crossing to count if ID was born in-band and moving toward that line")
@@ -183,17 +193,21 @@ def main():
     events_recent = deque(maxlen=8)
     flash = {"txt": "", "until": 0.0, "color": (0,255,0)}
 
-    # Source
-    cap = cv2.VideoCapture(0 if str(args.source).isdigit() else args.source)
-    if not cap.isOpened():
-        print(f"Could not open source: {args.source}")
+    # Source via Picamera2
+    picam2 = Picamera2()
+    video_config = picam2.create_video_configuration(
+        main={"size": (1280, 720), "format": "RGB888"}
+    )
+    picam2.configure(video_config)
+    picam2.start()
+
+    # Grab one frame to get dimensions
+    frame_rgb = picam2.capture_array()
+    if frame_rgb is None:
+        print("Failed to capture initial frame from Picamera2")
         return
 
-    ok, frame = cap.read()
-    if not ok:
-        print("No frames available.")
-        return
-
+    frame = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
     h, w = frame.shape[:2]
 
     # Gates
@@ -356,8 +370,12 @@ def main():
     last_proc_t = 0.0
 
     while True:
-        ok, frame = cap.read()
-        if not ok: break
+        frame_rgb = picam2.capture_array()
+        if frame_rgb is None:
+            print("Failed to capture frame from Picamera2")
+            break
+
+        frame = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
 
         t_now = time.time()
         if (t_now - last_proc_t) < (1.0 / max(1.0, args.target_fps)):
@@ -390,7 +408,7 @@ def main():
                    if res.boxes.id is not None else np.full((len(xyxy),), -1))
 
             for (x1, y1b, x2, y2b), cid, tid in zip(xyxy, clss, ids):
-                if tid is None or tid < 0: 
+                if tid is None or tid < 0:
                     continue
                 if not box_ok(x1, y1b, x2, y2b):
                     continue
@@ -427,7 +445,6 @@ def main():
 
                     top, bot = gate.top(), gate.bot()
 
-                    # --- replace your four crossed_* booleans with this ---
                     def crossed_down(y_prev, y_now, line):
                         return (y_prev < line) and (y_now >= line)
 
@@ -457,8 +474,6 @@ def main():
                     cd_ok = since >= max(0.0, args.cooldown_s)
                     age_ok = st.get("age", 0) >= int(args.min_track_age)
 
-                    
-                    # inside handle_top()/handle_bot() use this BEFORE setting last_line to 'A'/'B'
                     def handle_top():
                         # B -> A => -1 (unless invert)
                         if st["last_line"] == 'B' and speed_ok and cd_ok and age_ok:
@@ -493,8 +508,6 @@ def main():
                         else:
                             st["last_line"] = 'B'
 
-                            
-                    # when you compute crossed_* booleans, drop markers:
                     def tick(y, txt, col):
                         if args.debug_hits:
                             cv2.line(frame, (int(cx)-8, int(y)), (int(cx)+8, int(y)), col, 2)
@@ -511,16 +524,12 @@ def main():
                         if not age_ok:  reasons.append("age")
                         if not speed_ok: reasons.append("speed")
                         if not cd_ok:    reasons.append("cooldown")
-                        # show if we’re still inside the X-window when crossing:
                         if not (gate.xmin <= cx <= gate.xmax): reasons.append("xwin")
-                        # show if we didn’t clear hysteresis far enough past the line last frame
-                        # (useful near the very top of the frame)
                         if crossed_top_down and (st["y_prev"] >= top - args.hyst_px): reasons.append("hystA")
                         if crossed_bot_down and (st["y_prev"] >= bot - args.hyst_px): reasons.append("hystB")
                         if reasons:
                             put(frame, "skip:" + ",".join(reasons), (int(x1), max(12, int(y1b)-18)), 0.5, (0,0,255), 2)
 
-                    # ---- debug: lightweight always-on status label near the track center ----
                     if args.debug_hits:
                         info = f"{gate.name}:{st.get('last_line','-')} age={st.get('age',0)} vy={vy:+.1f}"
                         put(frame, info, (int(cx)+6, max(12, int(cy)-6)), 0.45, (0,255,255), 1)
@@ -529,7 +538,6 @@ def main():
                         want = 'B' if st["last_line"] == 'A' else 'A'
                         put(frame, f"→{want}", (int(cx)+10, max(12, int(cy)-22)), 0.6, (0,255,255), 2)
 
-                    
                     both = (crossed_top_down or crossed_top_up) and (crossed_bot_down or crossed_bot_up)
                     if both:
                         d_top = abs(st["y_prev"] - top)
@@ -554,7 +562,7 @@ def main():
                             break
                     color = (0, 255, 0) if in_any else (200, 200, 200)
                     cv2.rectangle(frame, (int(x1), int(y1b)), (int(x2), int(y2b)), color, 2)
-                    if args.show_labels:
+                    if show_labels:
                         put(frame, f"id:{int(tid)} c:{int(cid)}", (int(x1), max(12, int(y1b) - 4)), 0.48, color, 1)
 
         # draw gates & HUD
@@ -565,7 +573,7 @@ def main():
                               (0,255,255) if gi != active_gate_idx else (0,200,255), 2)
                 put(frame, f"{gate.name} A={top}px B={bot}px X=[{gate.xmin},{gate.xmax}]",
                     (10, 26 + gi*18), 0.5, (0,255,255) if gi != active_gate_idx else (0,200,255), 1)
-            
+
             put(frame, f"Occupancy: {occupancy}", (10, frame.shape[0]-10), 0.9, (200,255,200), 2)
 
             # ticker (last 5)
@@ -599,7 +607,7 @@ def main():
         if writer is not None:
             writer.write(frame)
 
-    cap.release()
+    picam2.stop()
     if writer is not None:
         writer.release()
     if args.display:
