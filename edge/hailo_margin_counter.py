@@ -23,8 +23,7 @@ from hailo_apps.hailo_app_python.core.common.buffer_utils import (
     get_numpy_from_buffer,
 )
 from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app import app_callback_class
-from hailo_apps.hailo_app_python.apps.detection.detection_pipeline import (
-    GStreamerDetectionApp,
+from hailo_apps.hailo_app_python.apps.detection.detection_pipeline import (GStreamerDetectionApp,
 )
 
 WATCHDOG_COUNT_FILE = "/tmp/hailo_edge_watchdog_count"
@@ -104,7 +103,16 @@ class user_app_callback_class(app_callback_class):
         self.use_frame = True
         self.args = args
         self.counter = None
-        self.tracker = SimpleTracker(max_dist=80, max_age=20)
+        self.tracker = SimpleTracker(max_dist=90, max_age=45)
+        
+        # Bootstrap state for initial auto-occupancy
+        self.start_ts = time.time()
+        self.bootstrap_secs = getattr(args, "bootstrap_secs", 0.0)
+        self.bootstrap_offset = getattr(args, "bootstrap_offset", 0)
+        self.bootstrap_ids = set()  # unique track ids seen in scan ROI
+        # If bootstrap_secs <= 0, we skip bootstrapping
+        self.bootstrap_done = (self.bootstrap_secs <= 0.0)
+
 
         # Watchdog: last time we got a good frame
         self.last_frame_ts = time.time()
@@ -114,7 +122,7 @@ class user_app_callback_class(app_callback_class):
         t.start()
 
     def _watchdog_loop(self):
-        timeout = 10.0  # seconds with no new frames before we say "frozen"
+        timeout = 20.0  # seconds with no new frames before we say "frozen"
         while True:
             time.sleep(1.0)
             since = time.time() - self.last_frame_ts
@@ -179,6 +187,11 @@ def app_callback(pad, info, user_data):
         return Gst.PadProbeReturn.OK
 
     frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+    
+    # Optional horizontal flip so User Frame is unmirrored
+    if user_data.args.flip_user_frame:
+        frame_bgr = cv2.flip(frame_bgr, 1)
+
 
     # Mark that we successfully got a frame
     user_data.last_frame_ts = time.time()
@@ -222,9 +235,35 @@ def app_callback(pad, info, user_data):
         raw_boxes.append((x1, y1, x2, y2))
         raw_confs.append(float(conf))
 
+    # ---------------------------------------------
+    # ROI filter: keep only boxes in top 30% of frame
+    # ---------------------------------------------
+    # ROI_FRAC = 0.30
+    # roi_bottom = int(ROI_FRAC * height)
+
+    # roi_boxes = []
+    # roi_confs = []
+    # for (x1, y1, x2, y2), conf in zip(raw_boxes, raw_confs):
+        # cy = 0.5 * (y1 + y2)
+        # if cy <= roi_bottom:
+            # roi_boxes.append((x1, y1, x2, y2))
+            # roi_confs.append(conf)
+
+    # raw_boxes = roi_boxes
+    # raw_confs = roi_confs
 
     # DEBUG: how many boxes did we actually keep this frame?
     # print("raw_boxes in this frame:", len(raw_boxes))
+
+    # If we flipped the image, flip the boxes so coords still align
+    if user_data.args.flip_user_frame and raw_boxes:
+        flipped_boxes = []
+        for (x1, y1, x2, y2) in raw_boxes:
+            fx1 = width - x2
+            fx2 = width - x1
+            flipped_boxes.append((fx1, y1, fx2, y2))
+        raw_boxes = flipped_boxes
+
 
     # Assign persistent IDs using our SimpleTracker
     track_ids = user_data.tracker.update(raw_boxes)
@@ -250,32 +289,92 @@ def app_callback(pad, info, user_data):
     # DEBUG: how many detections will MarginCounter see?
     # print("detections passed to MarginCounter:", len(detections))
 
+    h, w = frame_out.shape[:2] if 'frame_out' in locals() else frame_bgr.shape[:2]
+
+    elapsed = t_now - user_data.start_ts
+
+    # -------------------------------------------------------------
+    # Bootstrap: auto-estimate initial occupancy for first N seconds
+    # -------------------------------------------------------------
+    if not user_data.bootstrap_done:
+        # Determine scan ROI
+        sxmin = max(0, user_data.args.scan_xmin)
+        sxmax = user_data.args.scan_xmax if user_data.args.scan_xmax > 0 else w
+        symin = max(0, user_data.args.scan_ymin)
+        symax = user_data.args.scan_ymax if user_data.args.scan_ymax > 0 else h
+
+        for det in detections:
+            x1, y1, x2, y2 = det["xyxy"]
+            tid = det["id"]
+            cx = 0.5 * (x1 + x2)
+            cy = 0.5 * (y1 + y2)
+            if sxmin <= cx <= sxmax and symin <= cy <= symax:
+                user_data.bootstrap_ids.add(tid)
+
+        if elapsed >= user_data.bootstrap_secs:
+            auto_count = len(user_data.bootstrap_ids)
+            seed = auto_count + user_data.bootstrap_offset
+            user_data.args.seed_occupancy = seed
+            print(f"[BOOTSTRAP] auto_count={auto_count}, offset={user_data.bootstrap_offset}, seed_occupancy={seed}")
+            user_data.counter = MarginCounter(user_data.args, frame_bgr.shape)
+            user_data.bootstrap_done = True
+
+    # If bootstrap is disabled or done and we somehow still don't have a counter, create it now
+    if user_data.bootstrap_done and user_data.counter is None:
+        user_data.counter = MarginCounter(user_data.args, frame_bgr.shape)
+
+    # If we are still in the bootstrap window (no counter yet), just display status text
+    if user_data.counter is None:
+        frame_out = frame_bgr.copy()
+        cv2.putText(
+            frame_out,
+            f"Bootstrapping occupancy... {elapsed:.1f}/{user_data.bootstrap_secs:.1f}s",
+            (20, 40),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.0,
+            (0, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            frame_out,
+            f"Scan count so far: {len(user_data.bootstrap_ids)}",
+            (20, 80),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.0,
+            (0, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+        user_data.set_frame(frame_out)
+        return Gst.PadProbeReturn.OK
+
 
     # Run shared margin logic (updates occupancy, HUD, etc.)
     frame_out = user_data.counter.process(frame_bgr, detections, t_now)
 
     # EXTRA: always draw detections on the User Frame (debug visual)
-    for det in detections:
-        x1, y1, x2, y2 = det["xyxy"]
-        tid = det["id"]
-        # green boxes on user frame
-        cv2.rectangle(
-            frame_out,
-            (int(x1), int(y1)),
-            (int(x2), int(y2)),
-            (0, 255, 0),
-            2,
-        )
-        cv2.putText(
-            frame_out,
-            f"id:{tid}",
-            (int(x1), max(12, int(y1) - 4)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (0, 255, 0),
-            1,
-            cv2.LINE_AA,
-        )
+    # for det in detections:
+        # x1, y1, x2, y2 = det["xyxy"]
+        # tid = det["id"]
+        # # green boxes on user frame
+        # cv2.rectangle(
+            # frame_out,
+            # (int(x1), int(y1)),
+            # (int(x2), int(y2)),
+            # (0, 255, 0),
+            # 2,
+        # )
+        # cv2.putText(
+            # frame_out,
+            # f"id:{tid}",
+            # (int(x1), max(12, int(y1) - 4)),
+            # cv2.FONT_HERSHEY_SIMPLEX,
+            # 0.5,
+            # (0, 255, 0),
+            # 1,
+            # cv2.LINE_AA,
+        # )
 
     # ------------------------------------------------------------------
     # Draw gate masks directly here (Hailo overlay), independent of margin_core
@@ -287,6 +386,26 @@ def app_callback(pad, info, user_data):
     # Flip output horizontally (mirror) so orientation matches CPU script
     # ------------------------------------------------------------------
     # frame_out = cv2.flip(frame_out, 1)
+
+    # # Draw ROI line (top 30%) for visualization
+    # ROI_FRAC = 0.30
+    # roi_bottom = int(ROI_FRAC * frame_out.shape[0])
+    # cv2.line(
+        # frame_out,
+        # (0, roi_bottom),
+        # (frame_out.shape[1], roi_bottom),
+        # (0, 0, 255),
+        # 2,
+    # )
+    # cv2.putText(
+        # frame_out,
+        # "ROI (top 30%)",
+        # (10, max(20, roi_bottom - 10)),
+        # cv2.FONT_HERSHEY_SIMPLEX,
+        # 0.6,
+        # (0, 0, 255),
+        # 2,
+    # )
 
     # Give annotated frame back to app for display
     user_data.set_frame(frame_out)
@@ -302,6 +421,52 @@ if __name__ == "__main__":
         description="Hailo-powered margin counter (wraps GStreamerDetectionApp)",
         add_help=False,  # we'll let Hailo show its own -h if needed
     )
+
+    # Flipping view horizontally
+    parser.add_argument(
+        "--flip_user_frame",
+        action="store_true",
+        help="Flip frame & detections horizontally before MarginCounter so text is not mirrored.",
+    )
+    
+    # Initial auto-scan of parked cars
+    parser.add_argument(
+        "--bootstrap_secs",
+        type=float,
+        default=0.0,
+        help="If >0, first N seconds are used to auto-count parked cars for initial occupancy.",
+    )
+    parser.add_argument(
+        "--bootstrap_offset",
+        type=int,
+        default=0,
+        help="Extra cars to add on top of the auto-count.",
+    )
+    parser.add_argument(
+        "--scan_xmin",
+        type=int,
+        default=0,
+        help="Scan ROI left x (pixels).",
+    )
+    parser.add_argument(
+        "--scan_xmax",
+        type=int,
+        default=-1,
+        help="Scan ROI right x (pixels). -1 = full width.",
+    )
+    parser.add_argument(
+        "--scan_ymin",
+        type=int,
+        default=0,
+        help="Scan ROI top y (pixels).",
+    )
+    parser.add_argument(
+        "--scan_ymax",
+        type=int,
+        default=-1,
+        help="Scan ROI bottom y (pixels). -1 = full height.",
+    )
+
 
     # Gate geometry (copy from your working margin_counter.py defaults)
     parser.add_argument("--g1_A", type=int, default=85)
@@ -325,14 +490,14 @@ if __name__ == "__main__":
     parser.add_argument("--min_track_age", type=int, default=2)
     parser.add_argument("--invert_dir", action="store_true")
     parser.add_argument("--implied_seq", action="store_true")
-    parser.add_argument("--min_box_w", type=int, default=12)
-    parser.add_argument("--min_box_h", type=int, default=12)
+    parser.add_argument("--min_box_w", type=int, default=7)
+    parser.add_argument("--min_box_h", type=int, default=7)
     parser.add_argument("--max_ar", type=float, default=5.0)
     parser.add_argument("--max_capacity", type=int, default=73)
     parser.add_argument("--debug_hits", action="store_true")
 
     # Control gate mask opacity on Hailo output
-    parser.add_argument("--mask_alpha", type=float, default=0.25)
+    parser.add_argument("--mask_alpha", type=float, default=0.0) # 0.25
 
     # IMPORTANT: parse only our args, leave the rest for Hailo
     args, remaining = parser.parse_known_args()

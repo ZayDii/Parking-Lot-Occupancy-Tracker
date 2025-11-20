@@ -3,13 +3,13 @@
 import json
 from collections import defaultdict, deque
 from datetime import datetime, timezone
-
+from zoneinfo import ZoneInfo
 import cv2
 import numpy as np
 
 
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+# def now_iso() -> str:
+    # return datetime.now(timezone.utc).isoformat()
 
 
 def put(frame, txt, org, scale=0.55, color=(255, 255, 0), thick=2):
@@ -106,17 +106,17 @@ class MarginCounter:
 
         # --- config knobs (same semantics as margin_counter.py) ----
         yref_mode = getattr(args, "yref", "topq")
-        min_speed = float(getattr(args, "min_speed", 1.0))
+        min_speed = float(getattr(args, "min_speed", 0.1))
         cooldown_s = float(getattr(args, "cooldown_s", 0.0))
         debounce_frames = int(getattr(args, "debounce_frames", 2))
         hyst_px = int(getattr(args, "hyst_px", 2))
-        min_track_age = int(getattr(args, "min_track_age", 2))
+        min_track_age = int(getattr(args, "min_track_age", 1))
         invert_dir = bool(getattr(args, "invert_dir", False))
         implied_seq = bool(getattr(args, "implied_seq", False))
-        min_box_w = int(getattr(args, "min_box_w", 12))
-        min_box_h = int(getattr(args, "min_box_h", 12))
+        min_box_w = int(getattr(args, "min_box_w", 3))
+        min_box_h = int(getattr(args, "min_box_h", 3))
         max_ar = float(getattr(args, "max_ar", 5.0))
-        max_capacity = int(getattr(args, "max_capacity", 9999))
+        max_capacity = int(getattr(args, "max_capacity", 73))
         show_labels = bool(getattr(args, "show_labels", True))
         debug_hits = bool(getattr(args, "debug_hits", False))
         display = bool(getattr(args, "display", True))
@@ -152,10 +152,18 @@ class MarginCounter:
             """Update occupancy and record an event."""
             before = self.occupancy
             after = before + (1 if delta > 0 else -1)
+            # Clamp occupancy between 0 and max_capacity
             after = max(0, min(max_capacity, after))
 
+            # Fresh timestamps for this event
+            ts_utc = datetime.now(timezone.utc)
+            ts_est = ts_utc.astimezone(ZoneInfo("America/New_York"))
+
             event = {
-                "ts": now_iso(),
+                # Machine-friendly UTC
+                "ts_utc": ts_utc.isoformat(),
+                # Human-friendly local time (EST/EDT)
+                "ts_local": ts_est.strftime("%Y-%m-%d %I:%M:%S %p %Z"),
                 "delta": int(delta),
                 "track_id": int(tid),
                 "cls": int(cid),
@@ -170,6 +178,7 @@ class MarginCounter:
 
             # minimal JSON log for debugging
             print(json.dumps({"event": event, "occupancy": self.occupancy}))
+
 
         # -----------------------------------
         # main logic
@@ -411,8 +420,11 @@ class MarginCounter:
             # 4) ticker (last few events)
             y0 = 60
             for i, e in enumerate(list(self.events_recent)[-5:]):
+                # Prefer local human-friendly time, fall back to UTC if needed
+                ts_display = e.get("ts_local") or e.get("ts_utc", "")
+
                 msg = (
-                    f"{e['ts'][11:19]} "
+                    f"{ts_display} "
                     f"{'+' if e['delta'] > 0 else '-'}1 id={e['track_id']}"
                 )
                 put(
@@ -423,5 +435,6 @@ class MarginCounter:
                     (0, 200, 0) if e["delta"] > 0 else (0, 0, 255),
                     1,
                 )
+
 
         return frame
