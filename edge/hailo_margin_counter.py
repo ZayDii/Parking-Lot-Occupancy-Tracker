@@ -16,6 +16,8 @@ import signal
 import math
 from collections import defaultdict, deque
 
+from datetime import timezone
+from edge_outbox import EdgeOutbox
 from margin_core import MarginCounter
 
 from hailo_apps.hailo_app_python.core.common.buffer_utils import (
@@ -103,7 +105,7 @@ class user_app_callback_class(app_callback_class):
         self.use_frame = True
         self.args = args
         self.counter = None
-        self.tracker = SimpleTracker(max_dist=90, max_age=45)
+        self.tracker = SimpleTracker(max_dist=90, max_age=60)
         
         # Bootstrap state for initial auto-occupancy
         self.start_ts = time.time()
@@ -120,6 +122,24 @@ class user_app_callback_class(app_callback_class):
         # Start watchdog thread
         t = threading.Thread(target=self._watchdog_loop, daemon=True)
         t.start()
+        
+        # Outbox: local SQLite buffer + background sync to backend
+        self.outbox = EdgeOutbox()
+
+        # Define the hook that MarginCounter will call on each +1/-1 event
+        def _on_occ(ts_utc, occupancy_after, max_capacity):
+            # Always normalize to UTC ISO string
+            ts_iso = ts_utc.astimezone(timezone.utc).isoformat()
+            try:
+                self.outbox.insert_detection(ts_iso, occupancy_after, max_capacity)
+            except Exception as e:
+                # Don't kill the pipeline on DB errors
+                print(f"[edge_outbox] insert_detection failed: {e}", file=sys.stderr)
+
+        self.on_occupancy_update = _on_occ
+
+        # Fire up background sync thread (no-op if EDGE_INGEST_URL unset)
+        self.outbox.start_background_sync()
 
     def _watchdog_loop(self):
         timeout = 20.0  # seconds with no new frames before we say "frozen"
@@ -172,6 +192,12 @@ def app_callback(pad, info, user_data):
 
     # Increment internal frame counter
     user_data.increment()
+    
+    # FPS ~10
+    user_data.frame_index = getattr(user_data, "frame_index", 0) + 1
+    if user_data.frame_index % 2 != 0:
+        # Skip processing every other frame
+        return Gst.PadProbeReturn.OK
 
     # Get caps and frame metadata
     fmt, width, height = get_caps_from_pad(pad)
@@ -200,6 +226,9 @@ def app_callback(pad, info, user_data):
     if user_data.counter is None:
         user_data.counter = MarginCounter(user_data.args, frame_bgr.shape)
 
+        # Wire occupancy callback → SQLite outbox
+        if getattr(user_data, "on_occupancy_update", None):
+            user_data.counter.on_occupancy_update = user_data.on_occupancy_update
 
     t_now = time.time()
 
@@ -207,14 +236,19 @@ def app_callback(pad, info, user_data):
     roi = hailo.get_roi_from_buffer(buffer)
     hailo_dets = roi.get_objects_typed(hailo.HAILO_DETECTION)
 
-    # Collect boxes + confidences for vehicle-like classes
+    # Collect boxes + confidences + IDs for vehicle-like classes
     raw_boxes = []
     raw_confs = []
+    raw_ids   = []   # Hailo tracker IDs
 
     for det in hailo_dets:
         label = det.get_label()
         conf = det.get_confidence()
         bbox = det.get_bbox()
+
+        # Only keep cars from the beginning
+        if label != "car":
+            continue
 
         # Hailo bbox is normalized 0–1 → convert to pixel coords
         x1n, y1n, x2n, y2n = (
@@ -228,12 +262,16 @@ def app_callback(pad, info, user_data):
         x2 = float(x2n * width)
         y2 = float(y2n * height)
 
-        # Only keep vehicles (adjust labels if needed)
-        if label not in ("car", "truck", "bus"):
-            continue
-
         raw_boxes.append((x1, y1, x2, y2))
         raw_confs.append(float(conf))
+
+        # 🔹 Get Hailo's UNIQUE_ID (track ID) for this car
+        uid_objs = det.get_objects_typed(hailo.HAILO_UNIQUE_ID)
+        if uid_objs and len(uid_objs) > 0:
+            tid = uid_objs[0].get_id()
+        else:
+            tid = -1  # tracker didn't tag this detection
+        raw_ids.append(int(tid))
 
     # ---------------------------------------------
     # ROI filter: keep only boxes in top 30% of frame
@@ -264,9 +302,16 @@ def app_callback(pad, info, user_data):
             flipped_boxes.append((fx1, y1, fx2, y2))
         raw_boxes = flipped_boxes
 
-
-    # Assign persistent IDs using our SimpleTracker
-    track_ids = user_data.tracker.update(raw_boxes)
+    # Prefer Hailo tracker IDs; fallback to SimpleTracker if none
+    if raw_ids and any(tid >= 0 for tid in raw_ids):
+        track_ids = raw_ids
+        #print("USING HAILO TRACKER IDs:", track_ids)
+    else:
+        track_ids = user_data.tracker.update(raw_boxes)
+        #print("USING SIMPLETRACKER IDs:", track_ids)
+        
+    #if track_ids:
+        #print("Track IDs this frame:", track_ids)
 
     # DEBUG: show the IDs we assigned
     # print("assigned track_ids:", track_ids)
@@ -317,11 +362,18 @@ def app_callback(pad, info, user_data):
             user_data.args.seed_occupancy = seed
             print(f"[BOOTSTRAP] auto_count={auto_count}, offset={user_data.bootstrap_offset}, seed_occupancy={seed}")
             user_data.counter = MarginCounter(user_data.args, frame_bgr.shape)
+            # re-attach occupancy hook
+            if getattr(user_data, "on_occupancy_update", None):
+                user_data.counter.on_occupancy_update = user_data.on_occupancy_update
             user_data.bootstrap_done = True
+
 
     # If bootstrap is disabled or done and we somehow still don't have a counter, create it now
     if user_data.bootstrap_done and user_data.counter is None:
         user_data.counter = MarginCounter(user_data.args, frame_bgr.shape)
+        if getattr(user_data, "on_occupancy_update", None):
+            user_data.counter.on_occupancy_update = user_data.on_occupancy_update
+
 
     # If we are still in the bootstrap window (no counter yet), just display status text
     if user_data.counter is None:
@@ -469,21 +521,23 @@ if __name__ == "__main__":
 
 
     # Gate geometry (copy from your working margin_counter.py defaults)
-    parser.add_argument("--g1_A", type=int, default=85)
-    parser.add_argument("--g1_B", type=int, default=124)
-    parser.add_argument("--g1_xmin", type=int, default=484)
-    parser.add_argument("--g1_xmax", type=int, default=573)
+    parser.add_argument("--g1_A", type=int, default=30)
+    parser.add_argument("--g1_B", type=int, default=52)
+    parser.add_argument("--g1_xmin", type=int, default=292)
+    parser.add_argument("--g1_xmax", type=int, default=398)
 
-    parser.add_argument("--g2_A", type=int, default=109)
-    parser.add_argument("--g2_B", type=int, default=153)
-    parser.add_argument("--g2_xmin", type=int, default=1464)
-    parser.add_argument("--g2_xmax", type=int, default=1558)
+    parser.add_argument("--g2_A", type=int, default=45)
+    parser.add_argument("--g2_B", type=int, default=70)
+    parser.add_argument("--g2_xmin", type=int, default=940)
+    parser.add_argument("--g2_xmax", type=int, default=1085)
 
     parser.add_argument("--seed_occupancy", type=int, default=0)
 
     # Margin / motion thresholds (same semantics as in margin_core)
     parser.add_argument("--yref", choices=["center", "top", "topq", "bottom"], default="topq")
     parser.add_argument("--min_speed", type=float, default=1.0)
+    parser.add_argument("--max_speed_px_s", type=float, default=0.0,
+    help="If >0, clamp |vy| to this many px/s before checks; 0 = disable clamp.")
     parser.add_argument("--cooldown_s", type=float, default=0.0)
     parser.add_argument("--debounce_frames", type=int, default=2)
     parser.add_argument("--hyst_px", type=int, default=2)

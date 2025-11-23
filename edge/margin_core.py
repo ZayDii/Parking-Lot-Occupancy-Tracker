@@ -8,10 +8,6 @@ import cv2
 import numpy as np
 
 
-# def now_iso() -> str:
-    # return datetime.now(timezone.utc).isoformat()
-
-
 def put(frame, txt, org, scale=0.55, color=(255, 255, 0), thick=2):
     cv2.putText(
         frame,
@@ -31,13 +27,19 @@ class Gate:
         self.A = 0
         self.B = 0
         self.xmin, self.xmax = 0, w - 1
+
+        # per-track state:
+        #   y_prev/t_prev: last reference Y + time
+        #   region: 'above' / 'inside' / 'below'
+        #   in_band: True while we are inside [A,B]
+        #   origin_side: 'above' or 'below' – where we came from when we entered band
         self.state = defaultdict(
             lambda: {
-                "last_line": None,
                 "y_prev": None,
                 "t_prev": 0.0,
-                "deb": deque(maxlen=2),
-                "age": 0,
+                "region": "inside",
+                "in_band": False,
+                "origin_side": None,
             }
         )
         # per-track last event time (for cooldown)
@@ -53,11 +55,13 @@ class Gate:
 class MarginCounter:
     """
     Shared margin logic used by both:
-      - CPU path (margin_counter.py) – if you call process() there
+      - CPU path (margin_counter.py)
       - Hailo path (hailo_margin_counter.py)
 
-    This version also draws a semi-transparent mask over each gate
-    (from A to B, and xmin to xmax) so you can clearly see the monitored margins.
+    Simple crossing logic:
+      - When a car enters the band [A,B] from above and later exits below -> +1 (A->B)
+      - When it enters from below and later exits above -> -1 (B->A)
+      - Direction can be flipped globally with --invert_dir.
     """
 
     def __init__(self, args, frame_shape):
@@ -72,7 +76,7 @@ class MarginCounter:
         self.gate1 = Gate("G1", h, w)
         self.gate2 = Gate("G2", h, w)
 
-        # geometry from args (same fields as in hailo_margin_counter.py)
+        # geometry from args
         self.gate1.A, self.gate1.B = int(args.g1_A), int(args.g1_B)
         self.gate1.xmin = max(0, int(args.g1_xmin))
         self.gate1.xmax = min(w - 1, int(args.g1_xmax))
@@ -87,6 +91,9 @@ class MarginCounter:
         # recent events for HUD ticker
         self.events_recent = deque(maxlen=8)
 
+        # optional hook for DB / telemetry
+        self.on_occupancy_update = None
+
     # ------------------------------------------------------------------
     # Core per-frame processing
     # ------------------------------------------------------------------
@@ -95,24 +102,17 @@ class MarginCounter:
         frame: numpy array (BGR)
         detections: list of dicts:
             {"id": track_id, "cls": cid, "conf": conf, "xyxy": (x1,y1,x2,y2)}
-
-        This function:
-          - filters boxes
-          - applies gate / crossing logic
-          - updates self.occupancy
-          - draws boxes, gate masks, gates, and HUD overlays onto 'frame'
         """
         args = self.args
 
-        # --- config knobs (same semantics as margin_counter.py) ----
+        # --- config knobs ----
         yref_mode = getattr(args, "yref", "topq")
         min_speed = float(getattr(args, "min_speed", 0.1))
+        max_speed_px_s = float(getattr(args, "max_speed_px_s", 0.0))
         cooldown_s = float(getattr(args, "cooldown_s", 0.0))
-        debounce_frames = int(getattr(args, "debounce_frames", 2))
         hyst_px = int(getattr(args, "hyst_px", 2))
-        min_track_age = int(getattr(args, "min_track_age", 1))
+        # min_track_age & implied_seq are ignored in this simplified logic
         invert_dir = bool(getattr(args, "invert_dir", False))
-        implied_seq = bool(getattr(args, "implied_seq", False))
         min_box_w = int(getattr(args, "min_box_w", 3))
         min_box_h = int(getattr(args, "min_box_h", 3))
         max_ar = float(getattr(args, "max_ar", 5.0))
@@ -121,8 +121,8 @@ class MarginCounter:
         debug_hits = bool(getattr(args, "debug_hits", False))
         display = bool(getattr(args, "display", True))
 
-        # NEW: mask opacity; >0 means we draw the semi-transparent gate bands
-        mask_alpha = float(getattr(args, "mask_alpha", 0.25))  # 0.25 = fairly visible
+        # mask opacity; >0 means we draw the semi-transparent gate bands
+        mask_alpha = float(getattr(args, "mask_alpha", 0.25))
 
         # -----------------------------------
         # helpers
@@ -152,17 +152,13 @@ class MarginCounter:
             """Update occupancy and record an event."""
             before = self.occupancy
             after = before + (1 if delta > 0 else -1)
-            # Clamp occupancy between 0 and max_capacity
             after = max(0, min(max_capacity, after))
 
-            # Fresh timestamps for this event
             ts_utc = datetime.now(timezone.utc)
             ts_est = ts_utc.astimezone(ZoneInfo("America/New_York"))
 
             event = {
-                # Machine-friendly UTC
                 "ts_utc": ts_utc.isoformat(),
-                # Human-friendly local time (EST/EDT)
                 "ts_local": ts_est.strftime("%Y-%m-%d %I:%M:%S %p %Z"),
                 "delta": int(delta),
                 "track_id": int(tid),
@@ -176,9 +172,17 @@ class MarginCounter:
             self.occupancy = after
             self.events_recent.append(event)
 
-            # minimal JSON log for debugging
-            print(json.dumps({"event": event, "occupancy": self.occupancy}))
+            hook = getattr(self, "on_occupancy_update", None)
+            if hook is not None:
+                try:
+                    hook(ts_utc=ts_utc, occupancy_after=after, max_capacity=max_capacity)
+                except Exception as e:
+                    print(json.dumps({
+                        "ts": ts_utc.isoformat(),
+                        "hook_error": str(e),
+                    }))
 
+            print(json.dumps({"event": event, "occupancy": self.occupancy}))
 
         # -----------------------------------
         # main logic
@@ -199,142 +203,122 @@ class MarginCounter:
 
             for gate in self.gates:
                 st = gate.state[tid]
-
-                # grow age when inside gate X-window
-                if gate.xmin <= cx <= gate.xmax:
-                    st["age"] = min(st.get("age", 0) + 1, 1000)
-                else:
-                    st.setdefault("age", 0)
-
-                # first sighting
-                if st["y_prev"] is None:
-                    st["y_prev"] = yR
-                    st["t_prev"] = t_now
-                    st["deb"] = deque(maxlen=max(1, debounce_frames))
-                    continue
-
-                dt = max(1e-3, t_now - st["t_prev"])
-                vy = (yR - st["y_prev"]) / dt  # +down, -up
-
-                if not (gate.xmin <= cx <= gate.xmax):
-                    st["y_prev"] = yR
-                    st["t_prev"] = t_now
-                    continue
-
                 top = gate.top()
                 bot = gate.bot()
 
-                # crossing helpers
-                def crossed_down(y_prev, y_now, line):
-                    return (y_prev < line) and (y_now >= line)
+                # -------- init per-track state for this gate --------
+                if st["y_prev"] is None:
+                    st["y_prev"] = yR
+                    st["t_prev"] = t_now
+                    # set initial region
+                    if yR < top - hyst_px:
+                        st["region"] = "above"
+                    elif yR > bot + hyst_px:
+                        st["region"] = "below"
+                    else:
+                        st["region"] = "inside"
+                    st["in_band"] = (st["region"] == "inside")
+                    st["origin_side"] = None
+                    continue
 
-                def crossed_up(y_prev, y_now, line):
-                    return (y_prev > line) and (y_now <= line)
+                # -------- compute vy --------
+                dt = max(1e-3, t_now - st["t_prev"])
+                vy = (yR - st["y_prev"]) / dt  # +down, -up
 
-                def dist_ok(y_prev, y_now, line, margin):
-                    return (abs(y_now - line) >= margin) or (
-                        abs(y_prev - line) >= margin
-                    )
+                if max_speed_px_s > 0:
+                    if vy > max_speed_px_s:
+                        vy = max_speed_px_s
+                    elif vy < -max_speed_px_s:
+                        vy = -max_speed_px_s
 
-                crossed_top_down = crossed_down(st["y_prev"], yR, top) and dist_ok(
-                    st["y_prev"], yR, top, hyst_px
-                )
-                crossed_top_up = crossed_up(st["y_prev"], yR, top) and dist_ok(
-                    st["y_prev"], yR, top, hyst_px
-                )
-                crossed_bot_down = crossed_down(st["y_prev"], yR, bot) and dist_ok(
-                    st["y_prev"], yR, bot, hyst_px
-                )
-                crossed_bot_up = crossed_up(st["y_prev"], yR, bot) and dist_ok(
-                    st["y_prev"], yR, bot, hyst_px
-                )
+                # -------- current region relative to band --------
+                if yR < top - hyst_px:
+                    region = "above"
+                elif yR > bot + hyst_px:
+                    region = "below"
+                else:
+                    region = "inside"
 
-                # seed last_line if born in-band & moving
-                if (
-                    st["last_line"] is None
-                    and (top <= st["y_prev"] <= bot and top <= yR <= bot and abs(vy) > 0.5)
-                ):
-                    st["last_line"] = "A" if vy > 0 else "B"
+                prev_region = st.get("region", "inside")
 
-                st["deb"].append(1 if vy > 0 else (-1 if vy < 0 else 0))
-                ssum = sum(st["deb"])
-                stable_sign = (
-                    1
-                    if ssum >= len(st["deb"]) * 0.5
-                    else (-1 if ssum <= -len(st["deb"]) * 0.5 else 0)
-                )
-                _ = stable_sign  # reserved if you want to re-use debounced sign
-
+                # -------- gating conditions --------
+                in_x = (gate.xmin <= cx <= gate.xmax)
                 since = t_now - gate.last_event_at[tid]
                 speed_ok = abs(vy) >= min_speed
                 cd_ok = since >= max(0.0, cooldown_s)
-                age_ok = st.get("age", 0) >= int(min_track_age)
 
-                # direction handlers
-                def handle_top():
-                    # B -> A => -1 (unless invert)
-                    if st["last_line"] == "B" and speed_ok and cd_ok and age_ok:
-                        delta = -1 if not invert_dir else +1
-                        emit_event(tid, cid, vy, yR, delta, box=(x1, y1b, x2, y2b))
-                        gate.last_event_at[tid] = t_now
-                        st["last_line"] = None
-                    elif (
-                        implied_seq
-                        and st["last_line"] is None
-                        and (top <= st["y_prev"] <= bot)
-                        and speed_ok
-                        and cd_ok
-                        and age_ok
-                    ):
-                        delta = -1 if not invert_dir else +1
-                        emit_event(tid, cid, vy, yR, delta, box=(x1, y1b, x2, y2b))
-                        gate.last_event_at[tid] = t_now
-                        st["last_line"] = None
-                    else:
-                        st["last_line"] = "A"
+                # -------- band entry/exit tracking (origin_side + fallback) --------
+                #
+                # When we first enter the band from above or below, remember origin_side.
+                # If we later leave on the opposite side, count a crossing.
+                # If we never had a clear origin_side (track spawned inside band),
+                # fall back to the original vy-based logic so we still count.
 
-                def handle_bot():
-                    # A -> B => +1 (unless invert)
-                    if st["last_line"] == "A" and speed_ok and cd_ok and age_ok:
-                        delta = +1 if not invert_dir else -1
-                        emit_event(tid, cid, vy, yR, delta, box=(x1, y1b, x2, y2b))
-                        gate.last_event_at[tid] = t_now
-                        st["last_line"] = None
-                    elif (
-                        implied_seq
-                        and st["last_line"] is None
-                        and (top <= st["y_prev"] <= bot)
-                        and speed_ok
-                        and cd_ok
-                        and age_ok
-                    ):
-                        delta = +1 if not invert_dir else -1
-                        emit_event(tid, cid, vy, yR, delta, box=(x1, y1b, x2, y2b))
-                        gate.last_event_at[tid] = t_now
-                        st["last_line"] = None
+                if region == "inside":
+                    # Just entered the band?
+                    if prev_region != "inside":
+                        if prev_region in ("above", "below"):
+                            st["origin_side"] = prev_region
+                        else:
+                            st["origin_side"] = None
+                    st["in_band"] = True
 
-                both = (crossed_top_down or crossed_top_up) and (
-                    crossed_bot_down or crossed_bot_up
-                )
-                if both:
-                    d_top = abs(st["y_prev"] - top)
-                    d_bot = abs(st["y_prev"] - bot)
-                    if d_top <= d_bot:
-                        handle_top()
-                        handle_bot()
-                    else:
-                        handle_bot()
-                        handle_top()
                 else:
-                    if crossed_top_down or crossed_top_up:
-                        handle_top()
-                    if crossed_bot_down or crossed_bot_up:
-                        handle_bot()
+                    # We are outside the band (above or below)
+                    if prev_region == "inside" and st.get("in_band", False):
+                        origin = st.get("origin_side")
 
+                        if in_x and speed_ok and cd_ok:
+                            if (
+                                origin in ("above", "below")
+                                and region in ("above", "below")
+                                and region != origin
+                            ):
+                                # Preferred: full crossing based on origin vs exit side
+                                if origin == "above" and region == "below":
+                                    raw_delta = +1   # A->B (enter lot)
+                                elif origin == "below" and region == "above":
+                                    raw_delta = -1   # B->A (leave lot)
+                                else:
+                                    raw_delta = 0
+
+                                if raw_delta != 0:
+                                    delta = -raw_delta if invert_dir else raw_delta
+                                    emit_event(
+                                        tid, cid, vy, yR, delta, box=(x1, y1b, x2, y2b)
+                                    )
+                                    gate.last_event_at[tid] = t_now
+
+                            elif origin is None:
+                                # Fallback: behave like your original logic
+                                # y grows downward. vy > 0 => moving down, vy < 0 => moving up.
+                                if region == "below" and vy > 0:
+                                    delta = +1 if not invert_dir else -1
+                                    emit_event(
+                                        tid, cid, vy, yR, delta, box=(x1, y1b, x2, y2b)
+                                    )
+                                    gate.last_event_at[tid] = t_now
+
+                                elif region == "above" and vy < 0:
+                                    delta = -1 if not invert_dir else +1
+                                    emit_event(
+                                        tid, cid, vy, yR, delta, box=(x1, y1b, x2, y2b)
+                                    )
+                                    gate.last_event_at[tid] = t_now
+
+                    # Reset band state whenever we are outside
+                    st["in_band"] = False
+                    st["origin_side"] = None
+
+
+
+
+                # -------- update state for next frame --------
                 st["y_prev"] = yR
                 st["t_prev"] = t_now
+                st["region"] = region
 
-                # draw per-box
+                # -------- draw per-box --------
                 if display:
                     in_any = False
                     for g in self.gates:
@@ -355,22 +339,29 @@ class MarginCounter:
                             1,
                         )
 
-                if debug_hits:
-                    info = f"{gate.name}:{st.get('last_line','-')} age={st.get('age',0)} vy={vy:+.1f}"
-                    put(
-                        frame,
-                        info,
-                        (int(cx) + 6, max(12, int(cy) - 6)),
-                        0.45,
-                        (0, 255, 255),
-                        1,
-                    )
+                # if debug_hits:
+                    # info = (
+                        # f"{gate.name}: reg={st.get('region')} "
+                        # f"in={st.get('in_band')} "
+                        # f"orig={st.get('origin_side')} "
+                        # f"vy={vy:+.1f}"
+                    # )
+                    # put(
+                        # frame,
+                        # info,
+                        # (int(cx) + 6, max(12, int(cy) - 6)),
+                        # 0.45,
+                        # (0, 255, 255),
+                        # 1,
+                    # )
+                    
+                
 
         # ------------------------------------------------------------------
         # draw gate MASKS + gate outlines + HUD
         # ------------------------------------------------------------------
         if display:
-            # 1) semi-transparent gate masks (this is what you’ve been expecting to see)
+            # 1) semi-transparent gate masks
             if mask_alpha > 0:
                 overlay = frame.copy()
                 for gi, gate in enumerate(self.gates):
@@ -379,12 +370,12 @@ class MarginCounter:
                         overlay,
                         (int(gate.xmin), int(top)),
                         (int(gate.xmax), int(bot)),
-                        (0, 255, 255),  # yellowish band
+                        (0, 255, 255),
                         -1,
                     )
                 cv2.addWeighted(overlay, mask_alpha, frame, 1.0 - mask_alpha, 0, frame)
 
-            # 2) gate outlines + labels (same as margin_counter.py)
+            # 2) gate outlines + labels
             for gi, gate in enumerate(self.gates):
                 top, bot = gate.top(), gate.bot()
                 cv2.rectangle(
@@ -420,9 +411,7 @@ class MarginCounter:
             # 4) ticker (last few events)
             y0 = 60
             for i, e in enumerate(list(self.events_recent)[-5:]):
-                # Prefer local human-friendly time, fall back to UTC if needed
                 ts_display = e.get("ts_local") or e.get("ts_utc", "")
-
                 msg = (
                     f"{ts_display} "
                     f"{'+' if e['delta'] > 0 else '-'}1 id={e['track_id']}"
@@ -435,6 +424,5 @@ class MarginCounter:
                     (0, 200, 0) if e["delta"] > 0 else (0, 0, 255),
                     1,
                 )
-
 
         return frame

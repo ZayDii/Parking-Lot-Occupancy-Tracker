@@ -8,6 +8,20 @@ HAILO_ENV="/home/ee96/hailo-rpi5-examples/setup_env.sh"
 export ZSH_VERSION=""
 export PYTHONPATH="${PYTHONPATH-}"
 
+# Edge → backend config
+export EDGE_LOT_ID="96N"
+export EDGE_CAMERA_ID="96N-east-1"
+
+
+# Use the same origin you configured as VITE_API_BASE for the frontend
+#export EDGE_INGEST_URL="https://your-backend-domain.com/api/ingest/detections"
+
+# Optional: if the backend requires a Bearer token
+# export EDGE_API_KEY="your-api-key"
+# Optional: custom DB path (otherwise defaults to ~/edge_data/edge_events.db)
+# export EDGE_DB_PATH="/home/ee96/Parking-Lot-Occupancy-Tracker/edge/edge_events.db"
+
+
 # Clear watchdog counter from previous runs
 rm -f /tmp/hailo_edge_watchdog_count 2>/dev/null || true
 
