@@ -16,6 +16,7 @@ import signal
 import math
 from collections import defaultdict, deque
 
+import json
 from datetime import timezone
 from edge_outbox import EdgeOutbox
 from margin_core import MarginCounter
@@ -29,6 +30,14 @@ from hailo_apps.hailo_app_python.apps.detection.detection_pipeline import (GStre
 )
 
 WATCHDOG_COUNT_FILE = "/tmp/hailo_edge_watchdog_count"
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def ensure_dir(p: Path) -> None:
+    p.mkdir(parents=True, exist_ok=True)
 
 class SimpleTracker:
     """
@@ -130,11 +139,33 @@ class user_app_callback_class(app_callback_class):
         def _on_occ(ts_utc, occupancy_after, max_capacity):
             # Always normalize to UTC ISO string
             ts_iso = ts_utc.astimezone(timezone.utc).isoformat()
+            # 1) Persist into the outbox / DB
             try:
                 self.outbox.insert_detection(ts_iso, occupancy_after, max_capacity)
             except Exception as e:
                 # Don't kill the pipeline on DB errors
-                print(f"[edge_outbox] insert_detection failed: {e}", file=sys.stderr)
+                print(f"[OUTBOX ERROR] {e}", file=sys.stderr)
+
+            # 2) Persist "last known occupancy" for crash/reboot resume
+            try:
+                ensure_dir(STATE_DIR)
+                LAST_STATE.write_text(
+                    json.dumps(
+                        {
+                            "ts": ts_iso,
+                            "occupancy": int(occupancy_after),
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            except Exception as e:
+                # Just log; don't crash the pipeline
+                print(
+                    json.dumps(
+                        {"ts": now_iso(), "persist_error": str(e)}
+                    ),
+                    file=sys.stderr,
+                )
 
         self.on_occupancy_update = _on_occ
 
