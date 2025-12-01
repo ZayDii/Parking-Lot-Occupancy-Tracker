@@ -35,4 +35,18 @@ export const ingestDetection = ({ lotId, cameraId, tsISO, occupiedCount, totalSp
     total_spots: totalSpots,
   }).then(r => r.data);
 
+  // frontend/src/api.js
+
+export async function getForecast(lotId = "Lot96N") {
+  // In dev, Vite proxies /api/* → backend (http://localhost:8000)
+  const res = await fetch(`/api/forecast/${lotId}`);
+
+  if (!res.ok) {
+    throw new Error(`Failed to fetch forecast: ${res.status}`);
+  }
+
+  return res.json(); // { lot_id, generated_at, capacity, horizons: { "2h": {...}, ... } }
+}
+
+
 export default api;
