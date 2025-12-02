@@ -17,13 +17,22 @@ def put(frame, txt, org, scale=0.55, color=(255, 255, 0), thick=2):
         scale,
         color,
         thick,
-        cv2.LINE_AA,
+        lineType=cv2.LINE_AA,
     )
 
 
 class Gate:
+    """
+    Simple vertical band gate:
+      - A,B: y-coordinates (top/bottom) in pixels
+      - xmin,xmax: horizontal region of interest
+    """
+
     def __init__(self, name, h, w):
         self.name = name
+        self.h = h
+        self.w = w
+
         self.A = 0
         self.B = 0
         self.xmin, self.xmax = 0, w - 1
@@ -42,8 +51,13 @@ class Gate:
                 "origin_side": None,
             }
         )
-        # per-track last event time (for cooldown)
+
+        # per-track cooldown timer for events
         self.last_event_at = defaultdict(lambda: 0.0)
+
+    def set_band(self, A, B):
+        self.A = float(A)
+        self.B = float(B)
 
     def top(self):
         return min(self.A, self.B)
@@ -71,6 +85,12 @@ class MarginCounter:
 
         # occupancy state
         self.occupancy = int(getattr(args, "seed_occupancy", 0) or 0)
+
+        # bootstrap / seed tracking
+        self.bootstrap_secs = float(getattr(args, "bootstrap_secs", 0.0))
+        self.bootstrap_done = (self.bootstrap_secs <= 0.0)
+        self.bootstrap_start_t = None   # first t_now seen during bootstrap
+        self._initial_pushed = False    # whether we've pushed initial occupancy to backend
 
         # gates
         self.gate1 = Gate("G1", h, w)
@@ -123,6 +143,55 @@ class MarginCounter:
 
         # mask opacity; >0 means we draw the semi-transparent gate bands
         mask_alpha = float(getattr(args, "mask_alpha", 0.25))
+
+        # -----------------------------------
+        # initial occupancy push (bootstrap / seed)
+        # -----------------------------------
+        # Case 1: we have a bootstrap window (>0 seconds)
+        if not self.bootstrap_done:
+            # Record the start time on first frame
+            if self.bootstrap_start_t is None:
+                self.bootstrap_start_t = t_now
+
+            elapsed = t_now - self.bootstrap_start_t
+
+            # Once we've survived the bootstrap window, push occupancy once
+            if elapsed >= self.bootstrap_secs and not self._initial_pushed:
+                ts_utc = datetime.now(timezone.utc)
+                hook = getattr(self, "on_occupancy_update", None)
+                if hook is not None:
+                    try:
+                        hook(
+                            ts_utc=ts_utc,
+                            occupancy_after=self.occupancy,
+                            max_capacity=max_capacity,
+                        )
+                    except Exception as e:
+                        print(json.dumps({
+                            "ts": ts_utc.isoformat(),
+                            "hook_error": str(e),
+                        }))
+                self._initial_pushed = True
+                self.bootstrap_done = True
+
+        # Case 2: no bootstrap (seed_occupancy / crash-resume) → push once on first frame
+        else:
+            if not self._initial_pushed:
+                ts_utc = datetime.now(timezone.utc)
+                hook = getattr(self, "on_occupancy_update", None)
+                if hook is not None:
+                    try:
+                        hook(
+                            ts_utc=ts_utc,
+                            occupancy_after=self.occupancy,
+                            max_capacity=max_capacity,
+                        )
+                    except Exception as e:
+                        print(json.dumps({
+                            "ts": ts_utc.isoformat(),
+                            "hook_error": str(e),
+                        }))
+                self._initial_pushed = True
 
         # -----------------------------------
         # helpers
@@ -310,9 +379,6 @@ class MarginCounter:
                     st["in_band"] = False
                     st["origin_side"] = None
 
-
-
-
                 # -------- update state for next frame --------
                 st["y_prev"] = yR
                 st["t_prev"] = t_now
@@ -340,22 +406,20 @@ class MarginCounter:
                         )
 
                 # if debug_hits:
-                    # info = (
-                        # f"{gate.name}: reg={st.get('region')} "
-                        # f"in={st.get('in_band')} "
-                        # f"orig={st.get('origin_side')} "
-                        # f"vy={vy:+.1f}"
-                    # )
-                    # put(
-                        # frame,
-                        # info,
-                        # (int(cx) + 6, max(12, int(cy) - 6)),
-                        # 0.45,
-                        # (0, 255, 255),
-                        # 1,
-                    # )
-                    
-                
+                #     info = (
+                #         f"{gate.name}: reg={st.get('region')} "
+                #         f"in={st.get('in_band')} "
+                #         f"orig={st.get('origin_side')} "
+                #         f"vy={vy:+.1f}"
+                #     )
+                #     put(
+                #         frame,
+                #         info,
+                #         (int(cx) + 6, max(12, int(cy) - 6)),
+                #         0.45,
+                #         (0, 255, 255),
+                #         1,
+                #     )
 
         # ------------------------------------------------------------------
         # draw gate MASKS + gate outlines + HUD
