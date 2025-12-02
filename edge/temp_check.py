@@ -1,7 +1,7 @@
 import time
 
 TEMP_FILE = "/sys/class/thermal/thermal_zone0/temp"
-SLEEP_SECS = 2.0  # how often to sample
+SLEEP_SECS = 5.0  # how often to sample
 
 def get_cpu_temp_c():
     with open(TEMP_FILE, "r") as f:

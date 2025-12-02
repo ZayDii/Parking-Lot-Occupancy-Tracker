@@ -17,7 +17,7 @@ import math
 from collections import defaultdict, deque
 
 import json
-from datetime import timezone
+from datetime import timezone, datetime
 from edge_outbox import EdgeOutbox
 from margin_core import MarginCounter
 
@@ -30,6 +30,9 @@ from hailo_apps.hailo_app_python.apps.detection.detection_pipeline import (GStre
 )
 
 WATCHDOG_COUNT_FILE = "/tmp/hailo_edge_watchdog_count"
+
+STATE_DIR = Path("/home/ee96/Parking-Lot-Occupancy-Tracker/edge/state")
+LAST_STATE = STATE_DIR / "last.json"
 
 
 def now_iso() -> str:
