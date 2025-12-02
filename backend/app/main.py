@@ -6,6 +6,14 @@ import statistics as stats
 import logging
 import traceback
 
+from fastapi import FastAPI
+from .routers import forecast
+
+app = FastAPI()
+
+app.include_router(forecast.router, prefix="/api")   # → /api/forecast/{lot_id}
+
+
 # ---- logging ---------------------------------------------------------------
 logger = logging.getLogger("app")
 logger.setLevel(logging.INFO)

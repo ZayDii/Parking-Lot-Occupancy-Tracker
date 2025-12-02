@@ -19,3 +19,8 @@ node_modules
 venv
 __pycache__/
 *.pyc
+events/edge_2/
+*.mp4
+
+# Do not commit YOLO weights
+edge/yolov8*.pt
