@@ -25,7 +25,7 @@ def train_for_lot(
     batch_size: int = 64,
     epochs: int = 20,
     lr: float = 1e-3,
-    device: str | None = None,
+    device = None,
 ):
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
